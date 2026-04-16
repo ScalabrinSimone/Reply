@@ -26,7 +26,7 @@ from tools import (
 # Strands OpenAIModel legge api_key e base_url dalle env var OPENAI_*
 # ---------------------------------------------------------------------------
 os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
-os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""]
+os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
 # ---------------------------------------------------------------------------
 # Langfuse v2-style come nel tutorial "Resource Management" della challenge:
