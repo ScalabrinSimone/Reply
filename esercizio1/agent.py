@@ -5,7 +5,7 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import get_client, observe
+from langfuse import Langfuse, observe
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -28,16 +28,15 @@ os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
 # ---------------------------------------------------------------------------
-# Langfuse: usiamo il pattern del tutorial ufficiale "Resource Management".
-# - SDK Python con decorator @observe(as_type="generation")
-# - client singleton via get_client()
-# - update_current_trace(session_id=...) per associare il session id
-# - update_current_generation(..., usage_details={...}) per i token
-# NOTA: le credenziali nel .env della challenge usano nomi custom
-#       (langfuse_publicKey, langfuse_privateKey, langfuse_host).
-#       Qui le ributtiamo anche nelle variabili attese da Langfuse
-#       (LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST).
+# Langfuse v2-style come nel tutorial "Resource Management" della challenge:
+# - from langfuse import Langfuse, observe
+# - langfuse_client = Langfuse(...)
+# - @observe(as_type="generation")
+# - langfuse_client.update_current_trace(session_id=...)
+# - langfuse_client.update_current_generation(..., usage_details={...})
+# Qui usiamo le stesse API, con le credenziali lette da config.py.
 # ---------------------------------------------------------------------------
+# Assicura che le env standard LANGFUSE_* siano settate (per coerenza con tutorial)
 if LANGFUSE_PUBLIC_KEY:
     os.environ.setdefault("LANGFUSE_PUBLIC_KEY", LANGFUSE_PUBLIC_KEY)
 if LANGFUSE_SECRET_KEY:
@@ -45,7 +44,11 @@ if LANGFUSE_SECRET_KEY:
 if LANGFUSE_HOST:
     os.environ.setdefault("LANGFUSE_HOST", LANGFUSE_HOST)
 
-langfuse = get_client()
+langfuse_client = Langfuse(
+    public_key=LANGFUSE_PUBLIC_KEY or os.getenv("LANGFUSE_PUBLIC_KEY"),
+    secret_key=LANGFUSE_SECRET_KEY or os.getenv("LANGFUSE_SECRET_KEY"),
+    host=LANGFUSE_HOST or os.getenv("LANGFUSE_HOST", "https://challenges.reply.com/langfuse"),
+)
 
 
 def generate_session_id() -> str:
@@ -103,18 +106,17 @@ Formato output finale (SOLO questo, nient'altro):
 
 @observe(as_type="generation")
 def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prompt: str) -> str:
-    """Esegue l'agente con tracing Langfuse.
+    """Esegue l'agente con tracing Langfuse (pattern tutorial Resource Management).
 
-    Pattern preso dal tutorial ufficiale della challenge (sessionid.txt):
     - @observe(as_type="generation") crea una generation Langfuse per ogni chiamata
-    - langfuse.update_current_trace(session_id=...) associa il session id alla trace
-    - langfuse.update_current_generation(..., usage_details={...}) invia i token
+    - langfuse_client.update_current_trace(session_id=...) associa il session id
+    - langfuse_client.update_current_generation(..., usage_details={...}) invia i token
     """
     # Associa il session_id alla trace corrente
-    langfuse.update_current_trace(session_id=session_id)
+    langfuse_client.update_current_trace(session_id=session_id)
 
     # Registra input e modello
-    langfuse.update_current_generation(
+    langfuse_client.update_current_generation(
         model=model_id,
         input=[{"role": "user", "content": user_prompt[:1000]}],
     )
@@ -132,7 +134,7 @@ def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prom
         usage = result.metrics.accumulated_usage
 
     # Aggiorna la generation con output e token
-    langfuse.update_current_generation(
+    langfuse_client.update_current_generation(
         model=model_id,
         output=output_str[:1000],
         usage_details={
@@ -216,11 +218,10 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
     # Esegui l'agente con tracing Langfuse
     raw_output = run_agent_with_trace(session_id, MODEL_ID, agent, user_prompt)
 
-    # Assicura che tutte le trace siano spedite a Langfuse
+    # Assicura che tutte le trace siano spedite a Langfuse (non bloccare se fallisce)
     try:
-        langfuse.flush()
+        langfuse_client.flush()
     except Exception:
-        # Non bloccare la gara in caso di problemi di rete con Langfuse
         pass
 
     # Estrai UUID validi dall'output del modello
