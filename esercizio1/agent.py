@@ -5,8 +5,7 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import Langfuse, get_client, observe
-from langfuse.decorators import langfuse_context
+from langfuse import Langfuse, observe
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -36,7 +35,7 @@ os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
 # ---------------------------------------------------------------------------
-# Client Langfuse esplicito (per update_current_trace e flush)
+# Client Langfuse esplicito (per update_current_trace, update_current_generation e flush)
 # ---------------------------------------------------------------------------
 langfuse_client = Langfuse(
     public_key=LANGFUSE_PUBLIC_KEY or "",
@@ -101,7 +100,6 @@ Formato output finale (SOLO questo, nient'altro):
 @observe(as_type="generation")
 def _run_agent(agent: Agent, user_prompt: str, session_id: str) -> str:
     """Esegue l'agente e traccia token usage + session_id su Langfuse."""
-    # Collega questa traccia alla sessione
     langfuse_client.update_current_trace(session_id=session_id)
     langfuse_client.update_current_generation(
         model=MODEL_ID,
