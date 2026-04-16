@@ -5,8 +5,7 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import Langfuse
-from langfuse.decorators import observe, langfuse_context
+from langfuse import Langfuse, observe
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -29,12 +28,11 @@ os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
 # ---------------------------------------------------------------------------
-# Langfuse v2-style con decorator e langfuse_context:
-# - from langfuse.decorators import observe, langfuse_context
-# - @observe(as_type="generation")
-# - langfuse_context.update_current_trace(session_id=...)
-# - langfuse_context.update_current_observation(..., usage_details={...})
-# Langfuse() viene usato solo per flush finale.
+# Langfuse v3-style come nel tutorial "Resource Management":
+# - from langfuse import Langfuse, observe
+# - @observe(as_type="generation") sul wrapper che chiama l'agente
+# - langfuse_client.update_current_trace(session_id=...)
+# - langfuse_client.update_current_generation(..., usage_details={...})
 # ---------------------------------------------------------------------------
 if LANGFUSE_PUBLIC_KEY:
     os.environ.setdefault("LANGFUSE_PUBLIC_KEY", LANGFUSE_PUBLIC_KEY)
@@ -52,10 +50,13 @@ langfuse_client = Langfuse(
 
 def generate_session_id() -> str:
     """Genera un session ID univoco: {TEAM_NAME}-{ULID}.
-    Il TEAM_NAME nel .env deve avere spazi sostituiti da trattini.
+
+    Allineato al tutorial ufficiale:
+    - TEAM_NAME preso da env (default "tutorial")
+    - spazi sostituiti da trattini
     """
-    team_name = os.getenv("TEAM_NAME", "team")
-    team_name = team_name.replace(" ", "-")  # sicurezza extra
+    team_name = os.getenv("TEAM_NAME", "tutorial")
+    team_name = team_name.replace(" ", "-")
     return f"{team_name}-{ulid.new().str}"
 
 
@@ -105,35 +106,36 @@ Formato output finale (SOLO questo, nient'altro):
 
 @observe(as_type="generation")
 def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prompt: str) -> str:
-    """Esegue l'agente con tracing Langfuse usando langfuse_context.
+    """Esegue l'agente con tracing Langfuse.
 
-    - @observe(as_type="generation") crea una generation Langfuse per ogni chiamata
-    - langfuse_context.update_current_trace(session_id=...) associa il session id
-    - langfuse_context.update_current_observation(..., usage_details={...}) invia i token
+    Pattern identico al tutorial Resource Management (versione Strands):
+    - @observe(as_type="generation") crea una generation per ogni chiamata
+    - update_current_trace(session_id=...) lega tutte le trace al session ID
+    - update_current_generation(..., usage_details={...}) riporta i token
     """
-    # Associa il session_id alla trace corrente
-    langfuse_context.update_current_trace(session_id=session_id)
+    # 1) lega la trace corrente al session_id
+    langfuse_client.update_current_trace(session_id=session_id)
 
-    # Registra input e modello sull'osservazione corrente
-    langfuse_context.update_current_observation(
+    # 2) registra input e modello
+    langfuse_client.update_current_generation(
         model=model_id,
         input=[{"role": "user", "content": user_prompt[:1000]}],
     )
 
-    # Esegui Strands agent
+    # 3) esegui Strands agent
     result = agent(user_prompt)
     output_str = str(result)
 
-    # Estrai usage dall'ultima invocazione dell'agente
+    # 4) estrai usage per questa chiamata
     invocation = getattr(getattr(result, "metrics", None), "latest_agent_invocation", None)
-    usage = {}
     if invocation is not None and hasattr(invocation, "usage"):
         usage = invocation.usage
-    elif hasattr(result, "metrics") and hasattr(result.metrics, "accumulated_usage"):
-        usage = result.metrics.accumulated_usage
+    else:
+        usage = getattr(getattr(result, "metrics", None), "accumulated_usage", {}) or {}
 
-    # Aggiorna l'osservazione con output e token
-    langfuse_context.update_current_observation(
+    # 5) aggiorna la generation con output e token
+    langfuse_client.update_current_generation(
+        model=model_id,
         output=output_str[:1000],
         usage_details={
             "input": usage.get("inputTokens", 0),
