@@ -1,10 +1,12 @@
 import os
 import json
 import re
+import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import get_client, observe
+from langfuse import Langfuse, get_client, observe
+from langfuse.decorators import langfuse_context
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -17,7 +19,7 @@ from tools import (
     check_geo_anomaly,
     analyze_communications,
     detect_anomalous_transactions,
-    set_shared_data,  # rende i dataset accessibili ai tool senza passarli nel prompt
+    set_shared_data,
 )
 
 # ---------------------------------------------------------------------------
@@ -32,6 +34,21 @@ os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST or ""
 # ---------------------------------------------------------------------------
 os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
+
+# ---------------------------------------------------------------------------
+# Client Langfuse esplicito (per update_current_trace e flush)
+# ---------------------------------------------------------------------------
+langfuse_client = Langfuse(
+    public_key=LANGFUSE_PUBLIC_KEY or "",
+    secret_key=LANGFUSE_SECRET_KEY or "",
+    host=LANGFUSE_HOST or "",
+)
+
+
+def generate_session_id() -> str:
+    """Genera un session ID univoco nel formato TEAM_NAME-ULID richiesto dalla challenge."""
+    team_name = os.getenv("TEAM_NAME", "team")
+    return f"{team_name}-{ulid.new().str}"
 
 
 def build_model() -> OpenAIModel:
@@ -79,12 +96,39 @@ Formato output finale (SOLO questo, nient'altro):
 
 
 # ---------------------------------------------------------------------------
-# @observe (Langfuse v3): traccia automaticamente input/output/latenza/token
+# Wrapper tracciato da Langfuse con session_id e token usage
 # ---------------------------------------------------------------------------
-@observe(name="fraud-detection-esercizio1")
-def _run_agent(agent: Agent, user_prompt: str) -> str:
-    response = agent(user_prompt)
-    return str(response)
+@observe(as_type="generation")
+def _run_agent(agent: Agent, user_prompt: str, session_id: str) -> str:
+    """Esegue l'agente e traccia token usage + session_id su Langfuse."""
+    # Collega questa traccia alla sessione
+    langfuse_client.update_current_trace(session_id=session_id)
+    langfuse_client.update_current_generation(
+        model=MODEL_ID,
+        input=[{"role": "user", "content": user_prompt}],
+    )
+
+    result = agent(user_prompt)
+    response = str(result)
+
+    # Estrai token usage dell'ultima invocazione
+    try:
+        invocation = result.metrics.latest_agent_invocation
+        usage = invocation.usage if invocation else result.metrics.accumulated_usage
+    except Exception:
+        usage = {}
+
+    langfuse_client.update_current_generation(
+        model=MODEL_ID,
+        output=response,
+        usage_details={
+            "input": usage.get("inputTokens", 0),
+            "output": usage.get("outputTokens", 0),
+            "total": usage.get("totalTokens", 0),
+        },
+    )
+
+    return response
 
 
 # ---------------------------------------------------------------------------
@@ -96,20 +140,20 @@ def run_fraud_detection():
     transactions: pd.DataFrame = data["transactions"]
 
     # Rende i dataset accessibili ai tool senza passarli nel prompt
-    # (evita troncamento JSON e context overflow)
     set_shared_data(data)
 
     tx_col = "transaction_id"  # colonna normalizzata da data_loader
 
-    # Estrai user_id univoci per il prompt
     user_ids = transactions["sender_id"].dropna().unique().tolist()
     users_json = json.dumps(data["users"])
 
-    # Riassunti leggeri per contestualizzare (non JSON grezzo delle tx)
     sms_preview = json.dumps(data["sms"])[:2000]
     mails_preview = json.dumps(data["mails"])[:2000]
     loc_preview = json.dumps(data["locations"])[:1000]
 
+    # Genera session ID univoco per questa esecuzione
+    session_id = generate_session_id()
+    print(f"[agent] Session ID: {session_id}")
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
     print(f"[agent] Utenti univoci: {user_ids}")
 
@@ -127,7 +171,7 @@ def run_fraud_detection():
 
     user_prompt = f"""
 Dataset disponibile (caricato nel contesto condiviso, accessibile dai tool):
-- {len(transactions)} transazioni (colonne normalizzate: transaction_id, sender_id, amount, balance_after, transaction_type, timestamp)
+- {len(transactions)} transazioni (colonne: transaction_id, sender_id, amount, balance_after, transaction_type, timestamp)
 - {len(data['locations']) if isinstance(data['locations'], list) else 'N'} record GPS
 - SMS e mail degli utenti
 - {len(data['users']) if isinstance(data['users'], list) else 'N'} profili utente
@@ -158,7 +202,7 @@ Anteprima Locations:
 Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
 """
 
-    raw_output = _run_agent(agent, user_prompt)
+    raw_output = _run_agent(agent, user_prompt, session_id)
 
     # Estrai UUID validi dall'output del modello
     uuids = re.findall(
@@ -170,14 +214,21 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
     valid_ids = set(transactions[tx_col].astype(str).tolist())
     fraud_ids = list(dict.fromkeys(uid for uid in uuids if uid in valid_ids))
 
+    # Output: session_id nella prima riga, poi un transaction_id per riga
     with open(OUTPUT_FILE, "w") as f:
+        f.write(session_id + "\n")
         f.write("\n".join(fraud_ids))
 
     print(f"\n[agent] Trovate {len(fraud_ids)} transazioni fraudolente.")
+    print(f"[agent] Session ID: {session_id}")
     print(f"[agent] Output: {OUTPUT_FILE}")
     print(f"[agent] Langfuse dashboard: {LANGFUSE_HOST}")
 
-    get_client().flush()
+    print("\n=== TRANSAZIONI FRAUDOLENTE ===")
+    for fid in fraud_ids:
+        print(fid)
+
+    langfuse_client.flush()
     return fraud_ids
 
 
