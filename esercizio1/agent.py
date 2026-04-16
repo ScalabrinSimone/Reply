@@ -1,9 +1,11 @@
 import os
 import json
+import re
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
 from langfuse import Langfuse
+from langfuse.decorators import observe, langfuse_context
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -18,18 +20,12 @@ from tools import (
     detect_anomalous_transactions,
 )
 
-
 # ---------------------------------------------------------------------------
-# Setup Langfuse per tracciare token e costi
+# Inizializza Langfuse globalmente (v3: usa variabili d'ambiente o parametri)
 # ---------------------------------------------------------------------------
-def setup_langfuse() -> Langfuse:
-    lf = Langfuse(
-        public_key=LANGFUSE_PUBLIC_KEY,
-        secret_key=LANGFUSE_SECRET_KEY,
-        host=LANGFUSE_HOST,
-    )
-    return lf
-
+os.environ["LANGFUSE_PUBLIC_KEY"] = LANGFUSE_PUBLIC_KEY or ""
+os.environ["LANGFUSE_SECRET_KEY"] = LANGFUSE_SECRET_KEY or ""
+os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST or ""
 
 # ---------------------------------------------------------------------------
 # Setup modello via OpenRouter
@@ -74,6 +70,19 @@ Formato output finale:
 
 
 # ---------------------------------------------------------------------------
+# Funzione agente decorata con @observe per Langfuse v3
+# ---------------------------------------------------------------------------
+@observe(name="fraud-detection-esercizio1")
+def _run_agent(agent: Agent, user_prompt: str, n_transactions: int) -> str:
+    """Esegue l'agente e traccia automaticamente la chiamata su Langfuse."""
+    langfuse_context.update_current_trace(
+        metadata={"n_transactions": n_transactions}
+    )
+    response = agent(user_prompt)
+    return str(response)
+
+
+# ---------------------------------------------------------------------------
 # Funzione principale
 # ---------------------------------------------------------------------------
 def run_fraud_detection():
@@ -87,13 +96,6 @@ def run_fraud_detection():
     sms_json = json.dumps(data["sms"])
     mail_json = json.dumps(data["mails"])
     users_json = json.dumps(data["users"])
-
-    # Setup Langfuse
-    langfuse = setup_langfuse()
-    trace = langfuse.trace(
-        name="fraud-detection-esercizio1",
-        metadata={"n_transactions": len(transactions)}
-    )
 
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
 
@@ -110,8 +112,6 @@ def run_fraud_detection():
         ],
     )
 
-    # Prompt utente: descrizione del task con i dati inline
-    # Passiamo un riassunto dei dati per non saturare il contesto
     user_prompt = f"""
 Hai a disposizione i seguenti dataset (gia' caricati nei tool):
 - {len(transactions)} transazioni (transactions_json disponibile nei tool)
@@ -141,14 +141,10 @@ Locations JSON (prime 2000 char):
 Rispondi SOLO con la lista degli ID delle transazioni fraudolente, uno per riga.
 """
 
-    # Esegui l'agente
-    span = trace.span(name="agent-run")
-    response = agent(user_prompt)
-    span.end()
+    # Esegui l'agente (tracciato automaticamente da @observe)
+    raw_output = _run_agent(agent, user_prompt, len(transactions))
 
-    # Estrai gli ID dall'output (righe che sembrano UUID)
-    import re
-    raw_output = str(response)
+    # Estrai gli UUID dall'output dell'agente
     uuids = re.findall(
         r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
         raw_output, re.IGNORECASE
@@ -167,7 +163,8 @@ Rispondi SOLO con la lista degli ID delle transazioni fraudolente, uno per riga.
     print(f"[agent] Output scritto in: {OUTPUT_FILE}")
     print("[agent] Controlla i costi su Langfuse:", LANGFUSE_HOST)
 
-    langfuse.flush()
+    # Flush esplicito per assicurarsi che i dati arrivino a Langfuse
+    langfuse_context.flush()
     return fraud_ids
 
 
