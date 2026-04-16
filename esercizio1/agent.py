@@ -5,7 +5,8 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import Langfuse, observe
+from langfuse import Langfuse
+from langfuse.decorators import observe
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -25,12 +26,12 @@ from tools import (
 # Strands OpenAIModel legge api_key e base_url dalle env var OPENAI_*
 # ---------------------------------------------------------------------------
 os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
-os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
+os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""]
 
 # ---------------------------------------------------------------------------
 # Langfuse v2-style come nel tutorial "Resource Management" della challenge:
-# - from langfuse import Langfuse, observe
-# - langfuse_client = Langfuse(...)
+# - from langfuse import Langfuse
+# - from langfuse.decorators import observe
 # - @observe(as_type="generation")
 # - langfuse_client.update_current_trace(session_id=...)
 # - langfuse_client.update_current_generation(..., usage_details={...})
@@ -198,7 +199,7 @@ Istruzioni:
 4. Per le transazioni piu' sospette, chiama check_geo_anomaly.
 5. Combina tutti i segnali e produci la lista finale.
 
-Ricorda: falso negativo = frode non rilevata = penalita' alta. In caso di dubbio, includi.
+Ricorda: falso negativo = frode non rilevata = penalita' alta. In caso di dubbio, INCLUDI.
 
 Profili utente (JSON):
 {users_json}
