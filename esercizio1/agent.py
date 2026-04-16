@@ -17,6 +17,7 @@ from tools import (
     check_geo_anomaly,
     analyze_communications,
     detect_anomalous_transactions,
+    set_shared_data,  # rende i dataset accessibili ai tool senza passarli nel prompt
 )
 
 # ---------------------------------------------------------------------------
@@ -38,7 +39,7 @@ def build_model() -> OpenAIModel:
     return OpenAIModel(
         model_id=MODEL_ID,
         params={
-            "temperature": 0.1,  # bassa temperatura = output deterministico
+            "temperature": 0.1,
             "max_tokens": 4096,
         }
     )
@@ -51,16 +52,26 @@ SYSTEM_PROMPT = """
 Sei un agente specializzato nel rilevamento di frodi finanziarie per MirrorPay nel 2087.
 Hai accesso a strumenti per analizzare transazioni, posizioni GPS, comunicazioni (SMS, email) e profili utente.
 
-Il tuo obiettivo e' identificare transazioni fraudolente nel dataset fornito.
+Il tuo obiettivo e' identificare TUTTE le transazioni fraudolente nel dataset. E' fondamentale non perderne nessuna.
 
-Principi guida:
-1. Una transazione e' sospetta se presenta piu' segnali combinati: importo anomalo, orario notturno,
-   posizione geografica incoerente con la residenza, o se l'utente ha ricevuto messaggi di phishing recenti.
-2. Preferisci avere qualche falso positivo piuttosto che perdere frodi reali (il costo del falso negativo e' alto).
-3. Analizza prima le transazioni anomale per tipo statistico, poi arricchisci con dati geografici e comunicativi.
-4. Restituisci SOLO gli ID delle transazioni che ritieni fraudolente, uno per riga, senza testo aggiuntivo.
+REGOLE OBBLIGATORIE:
+1. Devi chiamare TUTTI e 4 i tool prima di dare una risposta finale:
+   - detect_anomalous_transactions (senza parametri: legge dal dataset condiviso)
+   - get_user_transaction_stats per OGNI utente presente nel dataset
+   - analyze_communications per OGNI utente presente nel dataset
+   - check_geo_anomaly per le transazioni sospette
+2. Una transazione e' fraudolenta se presenta ALMENO UNO di questi segnali:
+   - importo statisticamente anomalo (z-score > 2.0)
+   - orario notturno (00:00-06:00)
+   - saldo residuo critico dopo la transazione (< 50)
+   - utente ha ricevuto SMS o mail di phishing
+   - anomalia geografica (GPS lontano dalla residenza)
+3. Il costo di un FALSO NEGATIVO (frode non rilevata) e' MOLTO PIU' ALTO del costo di un falso positivo.
+   Quindi: in caso di dubbio, INCLUDI la transazione nella lista.
+4. Non filtrare troppo: e' meglio riportare 20 transazioni sospette che perderne 5.
+5. Restituisci SOLO gli UUID delle transazioni fraudolente, uno per riga, senza testo aggiuntivo.
 
-Formato output finale:
+Formato output finale (SOLO questo, nient'altro):
 <transaction_id_1>
 <transaction_id_2>
 ...
@@ -84,14 +95,23 @@ def run_fraud_detection():
     data = load_all()
     transactions: pd.DataFrame = data["transactions"]
 
-    # data_loader normalizza le colonne: 'transaction_id' (con underscore)
-    tx_col = "transaction_id"
+    # Rende i dataset accessibili ai tool senza passarli nel prompt
+    # (evita troncamento JSON e context overflow)
+    set_shared_data(data)
 
-    tx_json = transactions.to_json(orient="records", date_format="iso")
-    loc_json = json.dumps(data["locations"])
+    tx_col = "transaction_id"  # colonna normalizzata da data_loader
+
+    # Estrai user_id univoci per il prompt
+    user_ids = transactions["sender_id"].dropna().unique().tolist()
     users_json = json.dumps(data["users"])
 
+    # Riassunti leggeri per contestualizzare (non JSON grezzo delle tx)
+    sms_preview = json.dumps(data["sms"])[:2000]
+    mails_preview = json.dumps(data["mails"])[:2000]
+    loc_preview = json.dumps(data["locations"])[:1000]
+
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
+    print(f"[agent] Utenti univoci: {user_ids}")
 
     model = build_model()
     agent = Agent(
@@ -106,30 +126,34 @@ def run_fraud_detection():
     )
 
     user_prompt = f"""
-Hai a disposizione i seguenti dataset:
-- {len(transactions)} transazioni
-- Dati GPS degli utenti
-- SMS e email degli utenti
-- Profili di {len(data['users']) if isinstance(data['users'], list) else 'N'} utenti
+Dataset disponibile (caricato nel contesto condiviso, accessibile dai tool):
+- {len(transactions)} transazioni (colonne normalizzate: transaction_id, sender_id, amount, balance_after, transaction_type, timestamp)
+- {len(data['locations']) if isinstance(data['locations'], list) else 'N'} record GPS
+- SMS e mail degli utenti
+- {len(data['users']) if isinstance(data['users'], list) else 'N'} profili utente
 
-Procedi nell'ordine:
-1. detect_anomalous_transactions: individua transazioni sospette per importo, orario, saldo.
-2. get_user_transaction_stats: per ogni sospetto, confronta con la baseline dell'utente.
-3. analyze_communications: verifica messaggi di phishing sugli utenti coinvolti.
-4. check_geo_anomaly: verifica coerenza geografica.
-5. Decidi quali transazioni sono fraudolente.
+Utenti presenti: {user_ids}
 
-Transactions JSON:
-{tx_json[:8000]}
+Istruzioni:
+1. Chiama detect_anomalous_transactions (senza parametri) per avere la lista iniziale di sospetti.
+2. Per ciascuno degli utenti {user_ids}, chiama get_user_transaction_stats(user_id=<id>).
+3. Per ciascuno degli utenti {user_ids}, chiama analyze_communications(user_id=<id>).
+4. Per le transazioni piu' sospette, chiama check_geo_anomaly.
+5. Combina tutti i segnali e produci la lista finale.
 
-Users JSON:
+Ricorda: falso negativo = frode non rilevata = penalita' alta. In caso di dubbio, includi.
+
+Profili utente (JSON):
 {users_json}
 
-SMS JSON (prime 3000 char):
-{json.dumps(data['sms'])[:3000]}
+Anteprima SMS:
+{sms_preview}
 
-Locations JSON (prime 2000 char):
-{loc_json[:2000]}
+Anteprima Mail:
+{mails_preview}
+
+Anteprima Locations:
+{loc_preview}
 
 Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
 """
@@ -142,7 +166,7 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
         raw_output, re.IGNORECASE
     )
 
-    # Filtra solo ID che esistono nel dataset reale (colonna: transaction_id)
+    # Filtra solo ID che esistono nel dataset reale
     valid_ids = set(transactions[tx_col].astype(str).tolist())
     fraud_ids = list(dict.fromkeys(uid for uid in uuids if uid in valid_ids))
 
