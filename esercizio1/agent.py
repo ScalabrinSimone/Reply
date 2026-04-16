@@ -6,6 +6,7 @@ import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
 from langfuse import get_client as langfuse_get_client
+from langfuse.types import TraceContext
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -22,8 +23,7 @@ from tools import (
 )
 
 # ---------------------------------------------------------------------------
-# Langfuse v4 (OTEL-based): le env var devono essere settate PRIMA che
-# get_client() inizializzi il singleton al primo utilizzo.
+# Langfuse v4: env var settate PRIMA che get_client() inizializzi il singleton.
 # ---------------------------------------------------------------------------
 os.environ["LANGFUSE_PUBLIC_KEY"] = LANGFUSE_PUBLIC_KEY or ""
 os.environ["LANGFUSE_SECRET_KEY"] = LANGFUSE_SECRET_KEY or ""
@@ -89,13 +89,16 @@ Formato output finale (SOLO questo, nient'altro):
 def run_agent_with_trace(agent: Agent, user_prompt: str, session_id: str) -> str:
     """Esegue l'agente dentro un'observation Langfuse v4 con session_id.
 
-    API corretta per langfuse 4.3.1 (verificata con dir() sul client):
-    - start_as_current_observation(name=...) senza 'type'
-    - update_current_span(session_id=...) per associare il session_id
+    API corretta per langfuse 4.3.1 (verificata con inspect.signature):
+    - start_as_current_observation(name=..., trace_context=TraceContext(session_id=...))
+    - update_current_span() NON accetta session_id come kwarg diretto
+    - TraceContext e' il modo ufficiale per passare session_id alla trace root
     """
     lf = langfuse_get_client()
-    with lf.start_as_current_observation(name="fraud-detection-esercizio1"):
-        lf.update_current_span(session_id=session_id)
+    with lf.start_as_current_observation(
+        name="fraud-detection-esercizio1",
+        trace_context=TraceContext(session_id=session_id),
+    ):
         result = agent(user_prompt)
         output_str = str(result)
     return output_str
