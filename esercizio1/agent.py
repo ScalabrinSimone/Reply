@@ -5,8 +5,8 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import Langfuse, observe
-from langfuse.decorators import langfuse_context
+import langfuse
+from langfuse import observe
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -34,15 +34,6 @@ os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST or ""
 # ---------------------------------------------------------------------------
 os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
-
-# ---------------------------------------------------------------------------
-# Client Langfuse esplicito (solo per flush finale)
-# ---------------------------------------------------------------------------
-langfuse_client = Langfuse(
-    public_key=LANGFUSE_PUBLIC_KEY or "",
-    secret_key=LANGFUSE_SECRET_KEY or "",
-    host=LANGFUSE_HOST or "",
-)
 
 
 def generate_session_id() -> str:
@@ -97,9 +88,13 @@ Formato output finale (SOLO questo, nient'altro):
 
 @observe(name="fraud-detection-esercizio1")
 def _run_agent(agent: Agent, user_prompt: str, session_id: str) -> str:
-    """Esegue l'agente e collega la trace al session_id su Langfuse v3."""
-    # In Langfuse v3 il session_id si imposta cosi' dentro una funzione @observe
-    langfuse_context.update_current_observation(session_id=session_id)
+    """Esegue l'agente e collega la trace al session_id su Langfuse v3.
+
+    In Langfuse v3 non esiste piu' langfuse.decorators.
+    Il session_id si imposta con langfuse.get_client().update_current_trace()
+    dentro una funzione decorata con @observe.
+    """
+    langfuse.get_client().update_current_trace(session_id=session_id)
     result = agent(user_prompt)
     return str(result)
 
@@ -201,7 +196,7 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
     for fid in fraud_ids:
         print(fid)
 
-    langfuse_client.flush()
+    langfuse.get_client().flush()
     return fraud_ids
 
 
