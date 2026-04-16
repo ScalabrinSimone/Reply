@@ -6,6 +6,7 @@ import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
 from langfuse import Langfuse, observe
+from langfuse.decorators import langfuse_context
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -94,8 +95,11 @@ Formato output finale (SOLO questo, nient'altro):
 """
 
 
-def _run_agent_inner(agent: Agent, user_prompt: str) -> str:
-    """Esegue l'agente Strands e restituisce la risposta come stringa."""
+@observe(name="fraud-detection-esercizio1")
+def _run_agent(agent: Agent, user_prompt: str, session_id: str) -> str:
+    """Esegue l'agente e collega la trace al session_id su Langfuse v3."""
+    # In Langfuse v3 il session_id si imposta cosi' dentro una funzione @observe
+    langfuse_context.update_current_observation(session_id=session_id)
     result = agent(user_prompt)
     return str(result)
 
@@ -171,12 +175,7 @@ Anteprima Locations:
 Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
 """
 
-    # @observe con session_id: modo corretto in Langfuse v3 per raggruppare le trace
-    @observe(name="fraud-detection-esercizio1", session_id=session_id)
-    def traced_run():
-        return _run_agent_inner(agent, user_prompt)
-
-    raw_output = traced_run()
+    raw_output = _run_agent(agent, user_prompt, session_id)
 
     # Estrai UUID validi dall'output del modello
     uuids = re.findall(
