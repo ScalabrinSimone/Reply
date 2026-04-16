@@ -1,0 +1,7 @@
+strands-agents
+openai
+faster-whisper
+pandas
+python-dotenv
+langfuse
+ulid-py
