@@ -27,9 +27,7 @@ os.environ["LANGFUSE_SECRET_KEY"] = LANGFUSE_SECRET_KEY or ""
 os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST or ""
 
 # ---------------------------------------------------------------------------
-# Strands OpenAIModel: api_key e base_url NON sono parametri diretti del costruttore.
-# Il modo corretto e' settarli come env var OPENAI_API_KEY e OPENAI_BASE_URL,
-# che il client openai sottostante legge automaticamente.
+# Strands OpenAIModel legge api_key e base_url dalle env var OPENAI_*
 # ---------------------------------------------------------------------------
 os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
@@ -86,9 +84,11 @@ def run_fraud_detection():
     data = load_all()
     transactions: pd.DataFrame = data["transactions"]
 
+    # data_loader normalizza le colonne: 'transaction_id' (con underscore)
+    tx_col = "transaction_id"
+
     tx_json = transactions.to_json(orient="records", date_format="iso")
     loc_json = json.dumps(data["locations"])
-    sms_json = json.dumps(data["sms"])
     users_json = json.dumps(data["users"])
 
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
@@ -142,8 +142,8 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
         raw_output, re.IGNORECASE
     )
 
-    # Filtra solo ID che esistono nel dataset reale
-    valid_ids = set(transactions["transactionid"].astype(str).tolist())
+    # Filtra solo ID che esistono nel dataset reale (colonna: transaction_id)
+    valid_ids = set(transactions[tx_col].astype(str).tolist())
     fraud_ids = list(dict.fromkeys(uid for uid in uuids if uid in valid_ids))
 
     with open(OUTPUT_FILE, "w") as f:
