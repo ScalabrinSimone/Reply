@@ -13,6 +13,7 @@ from config import (
     OUTPUT_FILE,
 )
 from data_loader import load_all
+from prescorer import compute_risk_scores
 from tools import (
     get_user_transaction_stats,
     check_geo_anomaly,
@@ -22,15 +23,9 @@ from tools import (
     set_shared_data,
 )
 
-# ---------------------------------------------------------------------------
-# Credenziali Strands/OpenRouter
-# ---------------------------------------------------------------------------
 os.environ["OPENAI_API_KEY"]  = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
-# ---------------------------------------------------------------------------
-# Langfuse v3-style
-# ---------------------------------------------------------------------------
 for key, val in [
     ("LANGFUSE_PUBLIC_KEY", LANGFUSE_PUBLIC_KEY),
     ("LANGFUSE_SECRET_KEY", LANGFUSE_SECRET_KEY),
@@ -54,61 +49,47 @@ def generate_session_id() -> str:
 def build_model() -> OpenAIModel:
     return OpenAIModel(
         model_id=MODEL_ID,
-        params={"temperature": 0.1, "max_tokens": 4096},
+        params={"temperature": 0.1, "max_tokens": 8192},
     )
 
 
-# ---------------------------------------------------------------------------
-# System prompt
-# ---------------------------------------------------------------------------
 SYSTEM_PROMPT = """
 Sei un agente specializzato nel rilevamento di frodi finanziarie per MirrorPay nel 2087.
-Hai accesso a cinque strumenti:
-  1. detect_anomalous_transactions  — rileva transazioni anomale per importo/orario/saldo
-  2. get_user_transaction_stats     — profilo comportamentale di un utente
-  3. analyze_communications         — analisi SMS e mail per phishing
-  4. analyze_audio_calls            — trascrizione STT e analisi segnali di frode nelle chiamate vocali
-  5. check_geo_anomaly              — verifica anomalia geografica GPS
 
-PROCEDURA OBBLIGATORIA:
-1. Chiama detect_anomalous_transactions() senza parametri per la lista iniziale di sospetti.
-2. Per OGNI utente nel dataset:
-   a. get_user_transaction_stats(user_id=<id>)
-   b. analyze_communications(user_id=<id>)
-   c. analyze_audio_calls(user_name=<nome_cognome>) — usa il nome in chiaro, es. 'guido dohn'
-3. Per le transazioni piu' sospette chiama check_geo_anomaly(...).
-4. Combina TUTTI i segnali per ogni transazione:
-   - z-score importo, orario notturno, saldo critico
-   - risk_score comunicazioni (SMS/mail)
-   - risk_score chiamate vocali (se l'utente ha audio con segnali di vishing/frode)
-   - anomalia geografica GPS
-5. Considera fraudolente le transazioni con combinazione di piu' segnali,
-   o con un segnale molto forte (es. vishing evidente + importo anomalo).
+Ricevi una lista di transazioni candidate con risk_score pre-calcolato (0-100)
+e le motivazioni dei segnali (inclusi eventuali segnali da chiamate vocali/vishing).
+Il tuo compito e' decidere quali CONFERMARE come fraudolente.
 
-Linee guida:
-- Falso negativo (frode non rilevata) = penalita' alta.
-- In caso di dubbio tra includere/escludere, scegli di INCLUDERE.
-- Restituisci SOLO gli UUID delle transazioni fraudolente, uno per riga.
+Hai a disposizione i tool per approfondire casi dubbi:
+  - get_user_transaction_stats(user_id)           -> profilo comportamentale utente
+  - analyze_communications(user_id)               -> analisi phishing SMS/mail
+  - analyze_audio_calls(user_name)                -> trascrizione STT e segnali vishing audio
+  - check_geo_anomaly(user_id, tx_id, ...)        -> verifica GPS
+  - detect_anomalous_transactions()               -> lista completa anomalie statistiche
 
-Formato output finale (SOLO questo):
-<transaction_id_1>
-<transaction_id_2>
-...
+REGOLE DI DECISIONE:
+  risk_score >= 60  -> INCLUDI sempre (segnali forti multipli)
+  risk_score 40-59  -> INCLUDI se almeno un tool conferma un segnale
+  risk_score 20-39  -> INCLUDI solo se un tool aggiuntivo trova un segnale chiaro
+
+CRITERIO FONDAMENTALE:
+  Il costo di un FALSO NEGATIVO (frode non rilevata) e' MOLTO piu' alto del falso positivo.
+  In caso di dubbio, INCLUDI.
+  Se risk_reasons contiene 'vishing audio', tratta l'utente come ad alto rischio.
+
+OUTPUT: SOLO UUID delle transazioni fraudolente, uno per riga. Nessun testo aggiuntivo.
 """
 
 
 @observe(as_type="generation")
 def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prompt: str) -> str:
-    """Esegue l'agente con tracing Langfuse (pattern Resource Management)."""
     langfuse_client.update_current_trace(session_id=session_id)
     langfuse_client.update_current_generation(
         model=model_id,
-        input=[{"role": "user", "content": user_prompt[:1000]}],
+        input=[{"role": "user", "content": user_prompt[:2000]}],
     )
-
     result     = agent(user_prompt)
     output_str = str(result)
-
     invocation = getattr(getattr(result, "metrics", None), "latest_agent_invocation", None)
     usage = (
         invocation.usage
@@ -117,7 +98,7 @@ def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prom
     )
     langfuse_client.update_current_generation(
         model=model_id,
-        output=output_str[:1000],
+        output=output_str[:2000],
         usage_details={
             "input":  usage.get("inputTokens", 0),
             "output": usage.get("outputTokens", 0),
@@ -127,59 +108,55 @@ def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prom
     return output_str
 
 
-# ---------------------------------------------------------------------------
-# Funzione principale
-# ---------------------------------------------------------------------------
 def run_fraud_detection():
     print("[agent] Caricamento dataset (inclusi audio)...")
     data = load_all()
     transactions: pd.DataFrame = data["transactions"]
     audio_files: list = data.get("audio_files", [])
-
-    # Rende tutto il dataset accessibile ai tool senza passarlo nel prompt
     set_shared_data(data)
-
-    tx_col   = "transaction_id"
-    user_ids = transactions["sender_id"].dropna().unique().tolist()
 
     session_id = generate_session_id()
     print(f"[agent] Session ID: {session_id}")
-    print(f"[agent] Transazioni: {len(transactions)} | Utenti: {len(user_ids)} | Audio: {len(audio_files)}")
+    print(f"[agent] Transazioni: {len(transactions)} | Audio: {len(audio_files)}")
+
+    # FIX 2: pre-scoring (include trascrizione audio)
+    print("[agent] Pre-scoring deterministico (inclusa trascrizione audio)...")
+    scored = compute_risk_scores(data)
+    print(f"[agent] Candidate (score>=20): {len(scored)}")
+
+    candidates_json = scored[[
+        "transaction_id", "sender_id", "amount", "hour",
+        "balance_after", "transaction_type", "z_score",
+        "risk_score", "risk_reasons",
+    ]].to_dict(orient="records")
+
+    MAX_CANDIDATES = 200
+    if len(candidates_json) > MAX_CANDIDATES:
+        print(f"[agent] Troncamento a {MAX_CANDIDATES} candidate per limite contesto.")
+        candidates_json = candidates_json[:MAX_CANDIDATES]
 
     model = build_model()
     agent = Agent(
         model=model,
         system_prompt=SYSTEM_PROMPT,
         tools=[
-            detect_anomalous_transactions,
             get_user_transaction_stats,
+            check_geo_anomaly,
             analyze_communications,
             analyze_audio_calls,
-            check_geo_anomaly,
+            detect_anomalous_transactions,
         ],
     )
 
-    # Nomi utenti dagli audio (es. 'guido dohn') per il prompt
-    audio_users = list({af["user_name"] for af in audio_files})
+    user_prompt = f"""Analizza le seguenti {len(candidates_json)} transazioni candidate (ordinate per risk_score decrescente).
+Per ogni transazione hai il risk_score (0-100) e le motivazioni (inclusi eventuali segnali audio/vishing).
+Usa i tool per approfondire i casi con score 20-59 prima di decidere.
+Includi tutte quelle con score >= 60 senza ulteriori verifiche.
 
-    user_prompt = f"""
-Hai accesso a un dataset condiviso con:
-- {len(transactions)} transazioni
-- {len(data['locations']) if isinstance(data['locations'], list) else 'N'} record GPS
-- {len(data['sms']) if isinstance(data['sms'], list) else 'N'} SMS
-- {len(data['mails']) if isinstance(data['mails'], list) else 'N'} email
-- {len(data['users']) if isinstance(data['users'], list) else 'N'} profili utente
-- {len(audio_files)} file audio (voicemail/chiamate)
+Transazioni candidate:
+{json.dumps(candidates_json, ensure_ascii=False, indent=None)}
 
-Utenti nel dataset transazioni: {user_ids}
-Utenti con file audio: {audio_users}
-
-LeggI i dati SOLO tramite i tool, non dai testi del prompt.
-Segui la procedura descritta nel system prompt.
-Ricorda: falso negativo = penalita' alta. In dubbio, INCLUDI.
-
-Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
-"""
+Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga."""
 
     raw_output = run_agent_with_trace(session_id, MODEL_ID, agent, user_prompt)
 
@@ -192,8 +169,8 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
         r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
         raw_output, re.IGNORECASE,
     )
-    valid_ids  = set(transactions[tx_col].astype(str).tolist())
-    fraud_ids  = list(dict.fromkeys(uid for uid in uuids if uid in valid_ids))
+    valid_ids = set(transactions["transaction_id"].astype(str).tolist())
+    fraud_ids = list(dict.fromkeys(uid for uid in uuids if uid in valid_ids))
 
     with open(OUTPUT_FILE, "w") as f:
         f.write(session_id + "\n")

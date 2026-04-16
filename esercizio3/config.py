@@ -7,8 +7,8 @@ load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OpenRouterKey")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Model: claude-3.5-haiku via OpenRouter
-MODEL_ID = "anthropic/claude-3-5-haiku"
+# FIX 1: cambio modello -> deepseek-r1 (chain-of-thought esplicito)
+MODEL_ID = "deepseek/deepseek-r1"
 
 # Langfuse config
 LANGFUSE_PUBLIC_KEY = os.getenv("langfuse_publicKey")
@@ -26,6 +26,4 @@ AUDIO_DIR         = f"{DATA_DIR}/audio"
 OUTPUT_FILE       = "output.txt"
 
 # Modello Whisper locale (faster-whisper).
-# Dimensioni: tiny < base < small < medium < large.
-# 'small' e' un buon compromesso qualita'/velocita' su CPU.
 WHISPER_MODEL_SIZE = os.getenv("WHISPER_MODEL", "small")
