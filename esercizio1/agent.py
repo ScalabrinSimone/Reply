@@ -5,7 +5,7 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-import langfuse
+from langfuse import get_client as langfuse_get_client
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -22,8 +22,8 @@ from tools import (
 )
 
 # ---------------------------------------------------------------------------
-# Langfuse v3 (OTEL-based): credenziali come env var PRIMA di qualsiasi import
-# del client. Il singleton viene inizializzato automaticamente da langfuse.
+# Langfuse v3 (OTEL-based): le env var devono essere settate PRIMA che
+# get_client() inizializzi il singleton al primo utilizzo.
 # ---------------------------------------------------------------------------
 os.environ["LANGFUSE_PUBLIC_KEY"] = LANGFUSE_PUBLIC_KEY or ""
 os.environ["LANGFUSE_SECRET_KEY"] = LANGFUSE_SECRET_KEY or ""
@@ -87,16 +87,17 @@ Formato output finale (SOLO questo, nient'altro):
 
 
 def run_agent_with_trace(agent: Agent, user_prompt: str, session_id: str) -> str:
-    """Esegue l'agente dentro uno span Langfuse v3 con session_id impostato.
+    """Esegue l'agente dentro uno span Langfuse v3 con session_id.
 
-    In Langfuse v3 (OTEL-based) l'API corretta e':
-      langfuse.start_as_current_span(name=...) come context manager,
-      poi langfuse.propagate_attributes(session_id=...) dentro lo span
-      per associare il session_id alla trace corrente.
-    Non esistono piu' lf.trace(), langfuse.decorators, update_current_trace.
+    In Langfuse v3 (OTEL-based):
+    - il client si ottiene con langfuse.get_client() (singleton)
+    - start_as_current_span e' un metodo del CLIENT, non del modulo
+    - propagate_attributes e' anch'esso un metodo del CLIENT
+    Ref: https://langfuse.com/docs/sdk/python/sdk-v3
     """
-    with langfuse.start_as_current_span(name="fraud-detection-esercizio1") as span:
-        langfuse.propagate_attributes(session_id=session_id)
+    lf = langfuse_get_client()
+    with lf.start_as_current_span(name="fraud-detection-esercizio1") as span:
+        lf.propagate_attributes(session_id=session_id)
         result = agent(user_prompt)
         output_str = str(result)
         span.set_attribute("output.length", len(output_str))
@@ -200,8 +201,8 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
     for fid in fraud_ids:
         print(fid)
 
-    # Flush: garantisce che tutti gli span vengano inviati prima di uscire
-    langfuse.get_client().flush()
+    # Flush: invia tutti gli span pendenti prima di uscire
+    langfuse_get_client().flush()
 
     return fraud_ids
 
