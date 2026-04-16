@@ -5,7 +5,7 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import Langfuse
+import langfuse
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -22,7 +22,8 @@ from tools import (
 )
 
 # ---------------------------------------------------------------------------
-# Langfuse v3: credenziali come env var PRIMA di qualsiasi chiamata
+# Langfuse v3 (OTEL-based): credenziali come env var PRIMA di qualsiasi import
+# del client. Il singleton viene inizializzato automaticamente da langfuse.
 # ---------------------------------------------------------------------------
 os.environ["LANGFUSE_PUBLIC_KEY"] = LANGFUSE_PUBLIC_KEY or ""
 os.environ["LANGFUSE_SECRET_KEY"] = LANGFUSE_SECRET_KEY or ""
@@ -85,28 +86,20 @@ Formato output finale (SOLO questo, nient'altro):
 """
 
 
-def run_agent_with_trace(agent: Agent, user_prompt: str, session_id: str, lf: Langfuse) -> str:
-    """Esegue l'agente creando una trace Langfuse v3 con session_id garantito.
+def run_agent_with_trace(agent: Agent, user_prompt: str, session_id: str) -> str:
+    """Esegue l'agente dentro uno span Langfuse v3 con session_id impostato.
 
-    In Langfuse v3 il modo piu' affidabile per associare session_id a una trace
-    e' crearla esplicitamente con lf.trace(session_id=...) e poi usare
-    trace.update() per registrare l'output. Non usiamo @observe perche'
-    non permette di passare session_id dinamico in modo garantito.
+    In Langfuse v3 (OTEL-based) l'API corretta e':
+      langfuse.start_as_current_span(name=...) come context manager,
+      poi langfuse.propagate_attributes(session_id=...) dentro lo span
+      per associare il session_id alla trace corrente.
+    Non esistono piu' lf.trace(), langfuse.decorators, update_current_trace.
     """
-    trace = lf.trace(
-        name="fraud-detection-esercizio1",
-        session_id=session_id,
-        input={"prompt_length": len(user_prompt)},
-    )
-
-    try:
+    with langfuse.start_as_current_span(name="fraud-detection-esercizio1") as span:
+        langfuse.propagate_attributes(session_id=session_id)
         result = agent(user_prompt)
         output_str = str(result)
-        trace.update(output={"raw": output_str[:500]})
-    except Exception as e:
-        trace.update(output={"error": str(e)})
-        raise
-
+        span.set_attribute("output.length", len(output_str))
     return output_str
 
 
@@ -135,13 +128,6 @@ def run_fraud_detection():
     print(f"[agent] Session ID: {session_id}")
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
     print(f"[agent] Utenti univoci: {user_ids}")
-
-    # Inizializza client Langfuse v3 esplicitamente
-    lf = Langfuse(
-        public_key=LANGFUSE_PUBLIC_KEY,
-        secret_key=LANGFUSE_SECRET_KEY,
-        host=LANGFUSE_HOST,
-    )
 
     model = build_model()
     agent = Agent(
@@ -188,7 +174,7 @@ Anteprima Locations:
 Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
 """
 
-    raw_output = run_agent_with_trace(agent, user_prompt, session_id, lf)
+    raw_output = run_agent_with_trace(agent, user_prompt, session_id)
 
     # Estrai UUID validi dall'output del modello
     uuids = re.findall(
@@ -214,8 +200,8 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
     for fid in fraud_ids:
         print(fid)
 
-    # Flush garantisce che tutte le trace vengano inviate prima di uscire
-    lf.flush()
+    # Flush: garantisce che tutti gli span vengano inviati prima di uscire
+    langfuse.get_client().flush()
 
     return fraud_ids
 
