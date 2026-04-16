@@ -80,22 +80,45 @@ Hai accesso a strumenti per analizzare transazioni, posizioni GPS, comunicazioni
 
 Il tuo obiettivo e' identificare TUTTE le transazioni fraudolente nel dataset. E' fondamentale non perderne nessuna.
 
-REGOLE OBBLIGATORIE:
-1. Devi chiamare TUTTI e 4 i tool prima di dare una risposta finale:
-   - detect_anomalous_transactions (senza parametri: legge dal dataset condiviso)
-   - get_user_transaction_stats per OGNI utente presente nel dataset
-   - analyze_communications per OGNI utente presente nel dataset
-   - check_geo_anomaly per le transazioni sospette
-2. Una transazione e' fraudolenta se presenta ALMENO UNO di questi segnali:
-   - importo statisticamente anomalo (z-score > 2.0)
-   - orario notturno (00:00-06:00)
-   - saldo residuo critico dopo la transazione (< 50)
-   - utente ha ricevuto SMS o mail di phishing
-   - anomalia geografica (GPS lontano dalla residenza)
-3. Il costo di un FALSO NEGATIVO (frode non rilevata) e' MOLTO PIU' ALTO del costo di un falso positivo.
-   Quindi: in caso di dubbio, INCLUDI la transazione nella lista.
-4. Non filtrare troppo: e' meglio riportare 20 transazioni sospette che perderne 5.
-5. Restituisci SOLO gli UUID delle transazioni fraudolente, uno per riga, senza testo aggiuntivo.
+PROCEDURA OBBLIGATORIA (segui questi passi in ordine):
+1. Chiama una volta detect_anomalous_transactions() SENZA parametri per ottenere una prima lista di transazioni candidate sospette basata su:
+   - importo anomalo per utente (z-score),
+   - orario notturno (00:00-06:00),
+   - saldo residuo critico dopo la transazione.
+
+2. Recupera il profilo comportamentale di OGNI utente presente nel dataset:
+   - per ciascun user_id chiama get_user_transaction_stats(user_id=...).
+   - usa questi dati per capire qual e' il comportamento normale dell'utente (importo medio, deviazione standard, tipi piu' frequenti, fasce orarie tipiche).
+
+3. Analizza il rischio derivante da SMS e mail per OGNI utente:
+   - per ciascun user_id chiama analyze_communications(user_id=...).
+   - se risk_score >= 40 considera l'utente ad alto rischio online;
+   - se risk_score >= 80 considera l'utente estremamente vulnerabile: qualsiasi transazione strana per lui va trattata con grande sospetto.
+
+4. Per le transazioni candidate piu' sospette (ad esempio importo molto anomalo o utente ad alto rischio):
+   - chiama check_geo_anomaly(user_id, transaction_id, timestamp, location, ...) per verificare se il GPS nelle ultime 24h e' molto lontano dalla citta' di residenza.
+   - se anomaly_flag e' True, considera questo un forte segnale di frode.
+
+5. Per OGNI transazione candidata costruisci un punteggio di rischio qualitativo combinando:
+   - segnali di importo/orario/saldo da detect_anomalous_transactions,
+   - scostamento dalle abitudini dell'utente da get_user_transaction_stats,
+   - livello di rischio comunicazioni da analyze_communications,
+   - eventuali anomalie geografiche da check_geo_anomaly.
+   Dai piu' peso alle combinazioni di piu' segnali (es. importo anomalo + orario notturno + utente con molti SMS di phishing).
+
+6. Considera fraudolente tutte le transazioni con rischio medio-alto, soprattutto se:
+   - l'utente ha ricevuto messaggi di phishing, O
+   - il GPS e' molto lontano dalla residenza, O
+   - il saldo viene quasi azzerato, O
+   - l'importo e' nettamente fuori scala per quell'utente.
+
+Linee guida decisionali:
+- Il costo di un FALSO NEGATIVO (frode non rilevata) e' MOLTO piu' alto del costo di un falso positivo.
+- In caso di dubbio tra includere o escludere una transazione sospetta, scegli di INCLUDERLA.
+- Non filtrare troppo: e' meglio riportare piu' transazioni sospette che perderne alcune molto gravi.
+
+OUTPUT FINALE:
+- Restituisci SOLO gli UUID delle transazioni che ritieni potenzialmente fraudolente, uno per riga, senza testo aggiuntivo.
 
 Formato output finale (SOLO questo, nient'altro):
 <transaction_id_1>
@@ -160,11 +183,8 @@ def run_fraud_detection():
 
     tx_col = "transaction_id"
     user_ids = transactions["sender_id"].dropna().unique().tolist()
-    users_json = json.dumps(data["users"])
-    sms_preview = json.dumps(data["sms"])[:2000]
-    mails_preview = json.dumps(data["mails"])[:2000]
-    loc_preview = json.dumps(data["locations"])[:1000]
 
+    # Il prompt non include piu' dump JSON lunghi: i dettagli vanno letti SOLO via tool
     session_id = generate_session_id()
     print(f"[agent] Session ID: {session_id}")
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
@@ -183,36 +203,25 @@ def run_fraud_detection():
     )
 
     user_prompt = f"""
-Dataset disponibile (caricato nel contesto condiviso, accessibile dai tool):
-- {len(transactions)} transazioni (colonne: transaction_id, sender_id, amount, balance_after, transaction_type, timestamp)
-- {len(data['locations']) if isinstance(data['locations'], list) else 'N'} record GPS
-- SMS e mail degli utenti
+Hai accesso a un dataset condiviso (non incluso nel testo del prompt) con:
+- {len(transactions)} transazioni (transaction_id, sender_id, amount, balance_after, transaction_type, timestamp, location, ...)
+- {len(data['locations']) if isinstance(data['locations'], list) else 'N'} record di posizione GPS
+- {len(data['sms']) if isinstance(data['sms'], list) else 'N'} SMS
+- {len(data['mails']) if isinstance(data['mails'], list) else 'N'} email
 - {len(data['users']) if isinstance(data['users'], list) else 'N'} profili utente
 
-Utenti presenti: {user_ids}
+Utenti presenti nel dataset: {user_ids}
 
-Istruzioni:
-1. Chiama detect_anomalous_transactions (senza parametri) per avere la lista iniziale di sospetti.
-2. Per ciascuno degli utenti {user_ids}, chiama get_user_transaction_stats(user_id=<id>).
-3. Per ciascuno degli utenti {user_ids}, chiama analyze_communications(user_id=<id>).
-4. Per le transazioni piu' sospette, chiama check_geo_anomaly.
-5. Combina tutti i segnali e produci la lista finale.
+NON fare deduzioni sui dati dal testo del prompt: per leggere i dati usa SEMPRE i tool forniti.
+Segui rigorosamente la procedura descritta nel system prompt per:
+- ottenere le transazioni candidate sospette,
+- analizzare gli utenti a rischio,
+- verificare segnali da comunicazioni e geolocalizzazione,
+- combinare i segnali e decidere quali transazioni sono potenzialmente fraudolente.
 
 Ricorda: falso negativo = frode non rilevata = penalita' alta. In caso di dubbio, INCLUDI.
 
-Profili utente (JSON):
-{users_json}
-
-Anteprima SMS:
-{sms_preview}
-
-Anteprima Mail:
-{mails_preview}
-
-Anteprima Locations:
-{loc_preview}
-
-Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
+Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga, senza testo aggiuntivo.
 """
 
     # Esegui l'agente con tracing Langfuse
