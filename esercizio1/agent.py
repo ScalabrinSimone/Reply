@@ -5,7 +5,7 @@ import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
 from langfuse import Langfuse
-from langfuse.decorators import observe, langfuse_context
+from langfuse import observe, langfuse_context
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
