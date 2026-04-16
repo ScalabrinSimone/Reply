@@ -4,19 +4,21 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # OpenRouter config
-OPENROUTER_API_KEY = os.getenv("OpenRouterKey")
+OPENROUTER_API_KEY  = os.getenv("OpenRouterKey")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# FIX 1: cambio modello -> deepseek-r1 (chain-of-thought esplicito)
-MODEL_ID = "deepseek/deepseek-r1"
+# PREMIUM MODEL: claude-opus-4-5 (seconda API key)
+# Massimo ragionamento multi-segnale disponibile su OpenRouter.
+# max_tokens alzato a 8192 per liste lunghe di candidate.
+MODEL_ID = "anthropic/claude-opus-4-5"
 
 # Langfuse config
 LANGFUSE_PUBLIC_KEY = os.getenv("langfuse_publicKey")
 LANGFUSE_SECRET_KEY = os.getenv("langfuse_privateKey")
-LANGFUSE_HOST = os.getenv("langfuse_host")
+LANGFUSE_HOST       = os.getenv("langfuse_host")
 
 # Paths (relativi alla cartella esercizio3/)
-DATA_DIR = "data"
+DATA_DIR          = "data"
 TRANSACTIONS_FILE = f"{DATA_DIR}/transactions-5-5.csv"
 LOCATIONS_FILE    = f"{DATA_DIR}/locations-2-2.json"
 MAILS_FILE        = f"{DATA_DIR}/mails-3-3.json"

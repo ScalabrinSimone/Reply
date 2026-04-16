@@ -18,8 +18,8 @@ from tools import (
     get_user_transaction_stats,
     check_geo_anomaly,
     analyze_communications,
-    detect_anomalous_transactions,
     analyze_audio_calls,
+    detect_anomalous_transactions,
     set_shared_data,
 )
 
@@ -57,25 +57,31 @@ SYSTEM_PROMPT = """
 Sei un agente specializzato nel rilevamento di frodi finanziarie per MirrorPay nel 2087.
 
 Ricevi una lista di transazioni candidate con risk_score pre-calcolato (0-100)
-e le motivazioni dei segnali (inclusi eventuali segnali da chiamate vocali/vishing).
-Il tuo compito e' decidere quali CONFERMARE come fraudolente.
+e le motivazioni dei segnali (inclusi eventuali segnali da chiamate vocali/vishing,
+IBAN nuovi, spike di frequenza, importi alti).
 
-Hai a disposizione i tool per approfondire casi dubbi:
+Hai a disposizione tool per approfondire:
   - get_user_transaction_stats(user_id)           -> profilo comportamentale utente
   - analyze_communications(user_id)               -> analisi phishing SMS/mail
-  - analyze_audio_calls(user_name)                -> trascrizione STT e segnali vishing audio
+  - analyze_audio_calls(user_name)                -> trascrizione STT e segnali vishing
   - check_geo_anomaly(user_id, tx_id, ...)        -> verifica GPS
   - detect_anomalous_transactions()               -> lista completa anomalie statistiche
 
 REGOLE DI DECISIONE:
-  risk_score >= 60  -> INCLUDI sempre (segnali forti multipli)
-  risk_score 40-59  -> INCLUDI se almeno un tool conferma un segnale
-  risk_score 20-39  -> INCLUDI solo se un tool aggiuntivo trova un segnale chiaro
+  risk_score >= 55  -> INCLUDI sempre (segnali forti)
+  risk_score 30-54  -> INCLUDI se almeno un tool conferma un segnale
+  risk_score 10-29  -> INCLUDI solo se il tool rivela un pattern chiaro di frode
+                       oppure se l'importo e' alto (>=3000) con almeno 1 segnale
+
+CRITERIO ECONOMICO:
+  Dai priorita' alle transazioni con importo piu' elevato: una frode da 5000 ha
+  impatto economico molto maggiore di una da 50. Se risk_reasons contiene
+  'importo alto assoluto' e ci sono altri segnali, INCLUDI.
 
 CRITERIO FONDAMENTALE:
-  Il costo di un FALSO NEGATIVO (frode non rilevata) e' MOLTO piu' alto del falso positivo.
+  Falso negativo (frode non rilevata) >> costo falso positivo.
   In caso di dubbio, INCLUDI.
-  Se risk_reasons contiene 'vishing audio', tratta l'utente come ad alto rischio.
+  Segnale 'vishing audio' o 'IBAN mai visto' = forte indicatore, tratta l'utente come ad alto rischio.
 
 OUTPUT: SOLO UUID delle transazioni fraudolente, uno per riga. Nessun testo aggiuntivo.
 """
@@ -119,10 +125,16 @@ def run_fraud_detection():
     print(f"[agent] Session ID: {session_id}")
     print(f"[agent] Transazioni: {len(transactions)} | Audio: {len(audio_files)}")
 
-    # FIX 2: pre-scoring (include trascrizione audio)
-    print("[agent] Pre-scoring deterministico (inclusa trascrizione audio)...")
+    print("[agent] Pre-scoring deterministico v2...")
     scored = compute_risk_scores(data)
-    print(f"[agent] Candidate (score>=20): {len(scored)}")
+    print(f"[agent] Candidate (score>=10): {len(scored)}")
+
+    # Stampa distribuzione score per debug
+    if not scored.empty:
+        bins = [10, 20, 30, 40, 55, 101]
+        labels = ["10-19", "20-29", "30-39", "40-54", "55+"]
+        scored["bucket"] = pd.cut(scored["risk_score"], bins=bins, labels=labels, right=False)
+        print("[agent] Distribuzione score:", scored["bucket"].value_counts().to_dict())
 
     candidates_json = scored[[
         "transaction_id", "sender_id", "amount", "hour",
@@ -130,9 +142,10 @@ def run_fraud_detection():
         "risk_score", "risk_reasons",
     ]].to_dict(orient="records")
 
-    MAX_CANDIDATES = 200
+    # Limite contesto: max 250 candidate (claude-opus ha contesto largo)
+    MAX_CANDIDATES = 250
     if len(candidates_json) > MAX_CANDIDATES:
-        print(f"[agent] Troncamento a {MAX_CANDIDATES} candidate per limite contesto.")
+        print(f"[agent] Troncamento a {MAX_CANDIDATES} candidate.")
         candidates_json = candidates_json[:MAX_CANDIDATES]
 
     model = build_model()
@@ -149,9 +162,14 @@ def run_fraud_detection():
     )
 
     user_prompt = f"""Analizza le seguenti {len(candidates_json)} transazioni candidate (ordinate per risk_score decrescente).
-Per ogni transazione hai il risk_score (0-100) e le motivazioni (inclusi eventuali segnali audio/vishing).
-Usa i tool per approfondire i casi con score 20-59 prima di decidere.
-Includi tutte quelle con score >= 60 senza ulteriori verifiche.
+Per ogni transazione hai il risk_score (0-100) e le motivazioni.
+
+Regole:
+- score >= 55: includi direttamente.
+- score 30-54: usa un tool per confermare, poi includi se confermato.
+- score 10-29: usa un tool, includi solo se trovi frode evidente o importo alto con segnale.
+- Se risk_reasons include 'vishing audio' o 'IBAN mai visto': tratta come alta priorita'.
+- Se 'importo alto assoluto' (>=3000) + almeno 1 altro segnale: includi.
 
 Transazioni candidate:
 {json.dumps(candidates_json, ensure_ascii=False, indent=None)}
