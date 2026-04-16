@@ -140,10 +140,13 @@ def check_geo_anomaly(user_id: str, transaction_id: str,
     if home_lat and home_lng and recent_positions:
         for pos in recent_positions:
             dist = _haversine(home_lat, home_lng,
-                              pos.get("lat", home_lat), pos.get("lng", home_lng))
+                              pos.get("lat", home_lat),
+                              pos.get("lng", home_lng))
             if dist > 500:
                 result["anomaly_flag"] = True
-                result["notes"].append(f"GPS a {round(dist)} km dalla residenza nelle 24h precedenti")
+                result["notes"].append(
+                    f"GPS a {round(dist)} km dalla residenza nelle 24h precedenti"
+                )
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -193,10 +196,16 @@ def analyze_communications(user_id: str, sms_json: str = "", mails_json: str = "
         user_sms = sms_data.get(user_id, [])
 
     for msg in user_sms:
-        text = str(msg.get("sms", "") or msg.get("text", "") or msg.get("content", "")).lower()
+        text = str(
+            msg.get("sms", "")
+            or msg.get("text", "")
+            or msg.get("content", "")
+        ).lower()
         for pattern in PHISHING_PATTERNS:
             if re.search(pattern, text):
-                risk_signals.append(f"SMS sospetto: '{pattern}' — '{text[:80]}'")
+                risk_signals.append(
+                    f"SMS sospetto: '{pattern}' — '{text[:80]}'"
+                )
                 break
 
     # Mail
@@ -209,10 +218,16 @@ def analyze_communications(user_id: str, sms_json: str = "", mails_json: str = "
         user_mails = mail_data.get(user_id, [])
 
     for mail in user_mails:
-        text = str(mail.get("mail", "") or mail.get("body", "") or mail.get("content", "")).lower()
+        text = str(
+            mail.get("mail", "")
+            or mail.get("body", "")
+            or mail.get("content", "")
+        ).lower()
         for pattern in PHISHING_PATTERNS:
             if re.search(pattern, text):
-                risk_signals.append(f"Mail sospetta: '{pattern}' — '{text[:80]}'")
+                risk_signals.append(
+                    f"Mail sospetta: '{pattern}' — '{text[:80]}'"
+                )
                 break
 
     risk_score = min(len(risk_signals) * 20, 100)
@@ -229,13 +244,13 @@ def analyze_communications(user_id: str, sms_json: str = "", mails_json: str = "
 # Tool 4: Rilevamento transazioni anomale per importo/ora/tipo
 # ---------------------------------------------------------------------------
 @tool
-def detect_anomalous_transactions(transactions_json: str = "", z_threshold: float = 1.8) -> str:
+def detect_anomalous_transactions(transactions_json: str = "", z_threshold: float = 2.2) -> str:
     """
     Identifica transazioni anomale per:
     - importo statisticamente anomalo rispetto alla media dell'utente (z-score)
     - orario notturno (00:00 - 06:00)
     - saldo negativo o quasi azzerato dopo la transazione (< 50)
-    - tipo di transazione insolito per quell'utente (raramente usato)
+    - tipo di transazione insolito per quell'utente (raramente usato, usato solo come segnale secondario)
     Restituisce lista di transaction_id sospetti con motivazione.
     Legge dal dataset condiviso se transactions_json non e' fornito.
     """
@@ -283,7 +298,7 @@ def detect_anomalous_transactions(transactions_json: str = "", z_threshold: floa
         if not tid:
             continue
 
-        # Importo anomalo (z-score moderatamente aggressivo)
+        # Importo anomalo (z-score piu' conservativo per ridurre falsi positivi)
         if pd.notna(row["z_score"]) and row["z_score"] > z_threshold:
             reasons.append(f"importo anomalo (z={round(row['z_score'], 2)})")
 
@@ -295,9 +310,9 @@ def detect_anomalous_transactions(transactions_json: str = "", z_threshold: floa
         if pd.notna(row["balance_after"]) and row["balance_after"] < 50:
             reasons.append(f"saldo residuo critico ({row['balance_after']})")
 
-        # Tipo di transazione raro per questo utente (freq < 10%)
+        # Tipo di transazione raro per questo utente (freq < 10%): solo come segnale aggiuntivo
         freq = row.get("freq")
-        if pd.notna(freq) and freq < 0.1:
+        if pd.notna(freq) and freq < 0.1 and reasons:
             reasons.append("tipo di transazione raro per questo utente")
 
         if reasons:
