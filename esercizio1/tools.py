@@ -229,13 +229,13 @@ def analyze_communications(user_id: str, sms_json: str = "", mails_json: str = "
 # Tool 4: Rilevamento transazioni anomale per importo/ora/tipo
 # ---------------------------------------------------------------------------
 @tool
-def detect_anomalous_transactions(transactions_json: str = "", z_threshold: float = 2.0) -> str:
+def detect_anomalous_transactions(transactions_json: str = "", z_threshold: float = 1.8) -> str:
     """
     Identifica transazioni anomale per:
     - importo statisticamente anomalo rispetto alla media dell'utente (z-score)
     - orario notturno (00:00 - 06:00)
     - saldo negativo o quasi azzerato dopo la transazione (< 50)
-    - tipo di transazione insolito per quell'utente
+    - tipo di transazione insolito per quell'utente (raramente usato)
     Restituisce lista di transaction_id sospetti con motivazione.
     Legge dal dataset condiviso se transactions_json non e' fornito.
     """
@@ -265,13 +265,25 @@ def detect_anomalous_transactions(transactions_json: str = "", z_threshold: floa
     txs = txs.merge(user_stats, on="sender_id", how="left")
     txs["z_score"] = (txs["amount"] - txs["mean_amount"]) / txs["std_amount"].replace(0, 1)
 
+    # Frequenze dei tipi di transazione per utente (per rilevare tipi rari)
+    type_counts = txs.groupby(["sender_id", "transaction_type"]).size().reset_index(name="count")
+    user_counts = txs.groupby("sender_id").size().reset_index(name="total")
+    type_freq = type_counts.merge(user_counts, on="sender_id")
+    type_freq["freq"] = type_freq["count"] / type_freq["total"].replace(0, 1)
+
+    txs = txs.merge(
+        type_freq[["sender_id", "transaction_type", "freq"]],
+        on=["sender_id", "transaction_type"],
+        how="left",
+    )
+
     for _, row in txs.iterrows():
         reasons = []
         tid = row.get("transaction_id", "")
         if not tid:
             continue
 
-        # Importo anomalo (z-score abbassato a 2.0 per catturare piu' frodi)
+        # Importo anomalo (z-score moderatamente aggressivo)
         if pd.notna(row["z_score"]) and row["z_score"] > z_threshold:
             reasons.append(f"importo anomalo (z={round(row['z_score'], 2)})")
 
@@ -283,6 +295,11 @@ def detect_anomalous_transactions(transactions_json: str = "", z_threshold: floa
         if pd.notna(row["balance_after"]) and row["balance_after"] < 50:
             reasons.append(f"saldo residuo critico ({row['balance_after']})")
 
+        # Tipo di transazione raro per questo utente (freq < 10%)
+        freq = row.get("freq")
+        if pd.notna(freq) and freq < 0.1:
+            reasons.append("tipo di transazione raro per questo utente")
+
         if reasons:
             suspicious.append({
                 "transaction_id": tid,
@@ -290,7 +307,8 @@ def detect_anomalous_transactions(transactions_json: str = "", z_threshold: floa
                 "amount": row.get("amount", ""),
                 "hour": int(row["hour"]) if pd.notna(row["hour"]) else None,
                 "balance_after": row.get("balance_after", ""),
-                "reasons": reasons
+                "transaction_type": row.get("transaction_type", ""),
+                "reasons": reasons,
             })
 
     return json.dumps(suspicious, ensure_ascii=False)
