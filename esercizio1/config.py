@@ -7,10 +7,11 @@ load_dotenv()
 OPENROUTER_API_KEY = os.getenv("OpenRouterKey")
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
 
-# Model: claude-3.5-haiku via OpenRouter
-# Ottimo rapporto qualita'/costo per task di analisi strutturata.
-# ~$0.001 per 1K token input, molto piu' economico di claude-3.5-sonnet.
-MODEL_ID = "anthropic/claude-3-5-haiku"
+# FIX 1: cambio modello.
+# deepseek/deepseek-r1 ha chain-of-thought esplicito: ragiona passo passo
+# prima di rispondere, ottimo per task di analisi multi-segnale.
+# Costo molto basso su OpenRouter (~$0.0005/1K token input).
+MODEL_ID = "deepseek/deepseek-r1"
 
 # Langfuse config
 LANGFUSE_PUBLIC_KEY = os.getenv("langfuse_publicKey")
