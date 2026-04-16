@@ -6,7 +6,7 @@ import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
 from langfuse import Langfuse
-from langfuse.decorators import observe
+from langfuse.decorators import observe, langfuse_context
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -29,15 +29,13 @@ os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
 # ---------------------------------------------------------------------------
-# Langfuse v2-style come nel tutorial "Resource Management" della challenge:
-# - from langfuse import Langfuse
-# - from langfuse.decorators import observe
+# Langfuse v2-style con decorator e langfuse_context:
+# - from langfuse.decorators import observe, langfuse_context
 # - @observe(as_type="generation")
-# - langfuse_client.update_current_trace(session_id=...)
-# - langfuse_client.update_current_generation(..., usage_details={...})
-# Qui usiamo le stesse API, con le credenziali lette da config.py.
+# - langfuse_context.update_current_trace(session_id=...)
+# - langfuse_context.update_current_observation(..., usage_details={...})
+# Langfuse() viene usato solo per flush finale.
 # ---------------------------------------------------------------------------
-# Assicura che le env standard LANGFUSE_* siano settate (per coerenza con tutorial)
 if LANGFUSE_PUBLIC_KEY:
     os.environ.setdefault("LANGFUSE_PUBLIC_KEY", LANGFUSE_PUBLIC_KEY)
 if LANGFUSE_SECRET_KEY:
@@ -107,17 +105,17 @@ Formato output finale (SOLO questo, nient'altro):
 
 @observe(as_type="generation")
 def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prompt: str) -> str:
-    """Esegue l'agente con tracing Langfuse (pattern tutorial Resource Management).
+    """Esegue l'agente con tracing Langfuse usando langfuse_context.
 
     - @observe(as_type="generation") crea una generation Langfuse per ogni chiamata
-    - langfuse_client.update_current_trace(session_id=...) associa il session id
-    - langfuse_client.update_current_generation(..., usage_details={...}) invia i token
+    - langfuse_context.update_current_trace(session_id=...) associa il session id
+    - langfuse_context.update_current_observation(..., usage_details={...}) invia i token
     """
     # Associa il session_id alla trace corrente
-    langfuse_client.update_current_trace(session_id=session_id)
+    langfuse_context.update_current_trace(session_id=session_id)
 
-    # Registra input e modello
-    langfuse_client.update_current_generation(
+    # Registra input e modello sull'osservazione corrente
+    langfuse_context.update_current_observation(
         model=model_id,
         input=[{"role": "user", "content": user_prompt[:1000]}],
     )
@@ -134,9 +132,8 @@ def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prom
     elif hasattr(result, "metrics") and hasattr(result.metrics, "accumulated_usage"):
         usage = result.metrics.accumulated_usage
 
-    # Aggiorna la generation con output e token
-    langfuse_client.update_current_generation(
-        model=model_id,
+    # Aggiorna l'osservazione con output e token
+    langfuse_context.update_current_observation(
         output=output_str[:1000],
         usage_details={
             "input": usage.get("inputTokens", 0),
