@@ -5,8 +5,8 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import get_client as langfuse_get_client
-from langfuse.types import TraceContext
+from langfuse import Langfuse, observe
+from langfuse.decorators import langfuse_context
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
@@ -23,22 +23,29 @@ from tools import (
 )
 
 # ---------------------------------------------------------------------------
-# Langfuse v4: env var settate PRIMA che get_client() inizializzi il singleton.
-# ---------------------------------------------------------------------------
-os.environ["LANGFUSE_PUBLIC_KEY"] = LANGFUSE_PUBLIC_KEY or ""
-os.environ["LANGFUSE_SECRET_KEY"] = LANGFUSE_SECRET_KEY or ""
-os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST or ""
-
-# ---------------------------------------------------------------------------
 # Strands OpenAIModel legge api_key e base_url dalle env var OPENAI_*
 # ---------------------------------------------------------------------------
 os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
+# ---------------------------------------------------------------------------
+# Langfuse client inizializzato con la classe Langfuse (pattern ufficiale challenge)
+# Ref: tutorial resource_management della challenge
+# ---------------------------------------------------------------------------
+langfuse_client = Langfuse(
+    public_key=LANGFUSE_PUBLIC_KEY,
+    secret_key=LANGFUSE_SECRET_KEY,
+    host=LANGFUSE_HOST or "https://challenges.reply.com/langfuse",
+)
+
 
 def generate_session_id() -> str:
-    """Genera un session ID univoco nel formato TEAM_NAME-ULID richiesto dalla challenge."""
+    """Genera un session ID univoco: {TEAM_NAME}-{ULID}.
+    TEAM_NAME deve essere senza spazi (sostituiti con trattini nel .env).
+    """
     team_name = os.getenv("TEAM_NAME", "team")
+    # Sicurezza extra: rimpiazza spazi residui con trattini
+    team_name = team_name.replace(" ", "-")
     return f"{team_name}-{ulid.new().str}"
 
 
@@ -86,21 +93,46 @@ Formato output finale (SOLO questo, nient'altro):
 """
 
 
-def run_agent_with_trace(agent: Agent, user_prompt: str, session_id: str) -> str:
-    """Esegue l'agente dentro un'observation Langfuse v4 con session_id.
+@observe(as_type="generation")
+def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prompt: str) -> str:
+    """Esegue l'agente con tracing Langfuse.
 
-    API corretta per langfuse 4.3.1 (verificata con inspect.signature):
-    - start_as_current_observation(name=..., trace_context=TraceContext(session_id=...))
-    - update_current_span() NON accetta session_id come kwarg diretto
-    - TraceContext e' il modo ufficiale per passare session_id alla trace root
+    Pattern ufficiale challenge (tutorial resource_management):
+    - @observe(as_type="generation") crea la generation su Langfuse
+    - langfuse_client.update_current_trace(session_id=...) associa il session_id
+    - langfuse_client.update_current_generation(usage_details=...) traccia i token
     """
-    lf = langfuse_get_client()
-    with lf.start_as_current_observation(
-        name="fraud-detection-esercizio1",
-        trace_context=TraceContext(session_id=session_id),
-    ):
-        result = agent(user_prompt)
-        output_str = str(result)
+    # Associa il session_id a questa trace
+    langfuse_client.update_current_trace(session_id=session_id)
+
+    langfuse_client.update_current_generation(
+        model=model_id,
+        input=[{"role": "user", "content": user_prompt[:500]}],  # preview input
+    )
+
+    # Esegui l'agente
+    result = agent(user_prompt)
+    output_str = str(result)
+
+    # Estrai token usage dall'invocazione corrente
+    invocation = result.metrics.latest_agent_invocation if hasattr(result, "metrics") else None
+    usage = {}
+    if invocation and hasattr(invocation, "usage"):
+        usage = invocation.usage
+    elif hasattr(result, "metrics") and hasattr(result.metrics, "accumulated_usage"):
+        usage = result.metrics.accumulated_usage
+
+    # Passa i token a Langfuse per il calcolo dei costi
+    langfuse_client.update_current_generation(
+        model=model_id,
+        output=output_str[:500],  # preview output
+        usage_details={
+            "input": usage.get("inputTokens", 0),
+            "output": usage.get("outputTokens", 0),
+            "total": usage.get("totalTokens", 0),
+        }
+    )
+
     return output_str
 
 
@@ -124,7 +156,6 @@ def run_fraud_detection():
     mails_preview = json.dumps(data["mails"])[:2000]
     loc_preview = json.dumps(data["locations"])[:1000]
 
-    # Genera session ID univoco per questa esecuzione (formato TEAM_NAME-ULID)
     session_id = generate_session_id()
     print(f"[agent] Session ID: {session_id}")
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
@@ -175,7 +206,10 @@ Anteprima Locations:
 Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
 """
 
-    raw_output = run_agent_with_trace(agent, user_prompt, session_id)
+    raw_output = run_agent_with_trace(session_id, MODEL_ID, agent, user_prompt)
+
+    # Flush: garantisce che tutte le trace vengano inviate prima di uscire
+    langfuse_client.flush()
 
     # Estrai UUID validi dall'output del modello
     uuids = re.findall(
@@ -200,9 +234,6 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
     print("\n=== TRANSAZIONI FRAUDOLENTE ===")
     for fid in fraud_ids:
         print(fid)
-
-    # Flush: invia tutti gli span pendenti prima di uscire
-    langfuse_get_client().flush()
 
     return fraud_ids
 
