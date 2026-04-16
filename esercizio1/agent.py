@@ -20,23 +20,27 @@ from tools import (
 )
 
 # ---------------------------------------------------------------------------
-# Langfuse v3: le credenziali vanno settate come env var PRIMA di get_client()
+# Langfuse v3: credenziali come env var PRIMA di qualsiasi chiamata
 # ---------------------------------------------------------------------------
 os.environ["LANGFUSE_PUBLIC_KEY"] = LANGFUSE_PUBLIC_KEY or ""
 os.environ["LANGFUSE_SECRET_KEY"] = LANGFUSE_SECRET_KEY or ""
 os.environ["LANGFUSE_HOST"] = LANGFUSE_HOST or ""
 
+# ---------------------------------------------------------------------------
+# Strands OpenAIModel: api_key e base_url NON sono parametri diretti del costruttore.
+# Il modo corretto e' settarli come env var OPENAI_API_KEY e OPENAI_BASE_URL,
+# che il client openai sottostante legge automaticamente.
+# ---------------------------------------------------------------------------
+os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
+os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
-# ---------------------------------------------------------------------------
-# Setup modello via OpenRouter
-# ---------------------------------------------------------------------------
+
 def build_model() -> OpenAIModel:
+    """Costruisce il modello Strands. Le credenziali vengono lette da env var."""
     return OpenAIModel(
         model_id=MODEL_ID,
-        api_key=OPENROUTER_API_KEY,
-        base_url=OPENROUTER_BASE_URL,
         params={
-            "temperature": 0.1,
+            "temperature": 0.1,  # bassa temperatura = output deterministico
             "max_tokens": 4096,
         }
     )
@@ -66,8 +70,7 @@ Formato output finale:
 
 
 # ---------------------------------------------------------------------------
-# Funzione agente decorata con @observe (Langfuse v3)
-# @observe crea automaticamente uno span/trace per ogni chiamata
+# @observe (Langfuse v3): traccia automaticamente input/output/latenza/token
 # ---------------------------------------------------------------------------
 @observe(name="fraud-detection-esercizio1")
 def _run_agent(agent: Agent, user_prompt: str) -> str:
@@ -86,7 +89,6 @@ def run_fraud_detection():
     tx_json = transactions.to_json(orient="records", date_format="iso")
     loc_json = json.dumps(data["locations"])
     sms_json = json.dumps(data["sms"])
-    mail_json = json.dumps(data["mails"])
     users_json = json.dumps(data["users"])
 
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
@@ -104,58 +106,54 @@ def run_fraud_detection():
     )
 
     user_prompt = f"""
-Hai a disposizione i seguenti dataset (gia' caricati nei tool):
+Hai a disposizione i seguenti dataset:
 - {len(transactions)} transazioni
-- Dati GPS di localizzazione degli utenti
+- Dati GPS degli utenti
 - SMS e email degli utenti
 - Profili di {len(data['users']) if isinstance(data['users'], list) else 'N'} utenti
 
-Usa i tool disponibili nell'ordine seguente:
-1. detect_anomalous_transactions: passa il JSON delle transazioni e individua quelle sospette per importo, orario, saldo.
-2. Per ogni transazione sospetta, usa get_user_transaction_stats per verificare se e' anomala rispetto alla baseline dell'utente.
-3. analyze_communications: verifica se gli utenti coinvolti hanno ricevuto messaggi di phishing.
-4. check_geo_anomaly: verifica coerenza geografica per transazioni in-person o con location specificata.
-5. Decidi quali transazioni sono fraudolente in base ai segnali raccolti.
+Procedi nell'ordine:
+1. detect_anomalous_transactions: individua transazioni sospette per importo, orario, saldo.
+2. get_user_transaction_stats: per ogni sospetto, confronta con la baseline dell'utente.
+3. analyze_communications: verifica messaggi di phishing sugli utenti coinvolti.
+4. check_geo_anomaly: verifica coerenza geografica.
+5. Decidi quali transazioni sono fraudolente.
 
-Transactions JSON (da passare a detect_anomalous_transactions):
+Transactions JSON:
 {tx_json[:8000]}
 
 Users JSON:
 {users_json}
 
 SMS JSON (prime 3000 char):
-{sms_json[:3000]}
+{json.dumps(data['sms'])[:3000]}
 
 Locations JSON (prime 2000 char):
 {loc_json[:2000]}
 
-Rispondi SOLO con la lista degli ID delle transazioni fraudolente, uno per riga.
+Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
 """
 
-    # Esegui agente — @observe traccia input/output/token su Langfuse automaticamente
     raw_output = _run_agent(agent, user_prompt)
 
-    # Estrai UUID validi dall'output
+    # Estrai UUID validi dall'output del modello
     uuids = re.findall(
         r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
         raw_output, re.IGNORECASE
     )
 
-    # Tieni solo ID che esistono realmente nel dataset
+    # Filtra solo ID che esistono nel dataset reale
     valid_ids = set(transactions["transactionid"].astype(str).tolist())
     fraud_ids = list(dict.fromkeys(uid for uid in uuids if uid in valid_ids))
 
     with open(OUTPUT_FILE, "w") as f:
         f.write("\n".join(fraud_ids))
 
-    print(f"\n[agent] Trovate {len(fraud_ids)} transazioni fraudolente sospette.")
-    print(f"[agent] Output scritto in: {OUTPUT_FILE}")
-    print(f"[agent] Controlla token e costi su Langfuse: {LANGFUSE_HOST}")
+    print(f"\n[agent] Trovate {len(fraud_ids)} transazioni fraudolente.")
+    print(f"[agent] Output: {OUTPUT_FILE}")
+    print(f"[agent] Langfuse dashboard: {LANGFUSE_HOST}")
 
-    # Flush: assicura che tutti gli span vengano inviati a Langfuse
-    lf = get_client()
-    lf.flush()
-
+    get_client().flush()
     return fraud_ids
 
 
