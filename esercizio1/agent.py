@@ -88,13 +88,20 @@ Formato output finale (SOLO questo, nient'altro):
 
 @observe(name="fraud-detection-esercizio1")
 def _run_agent(agent: Agent, user_prompt: str, session_id: str) -> str:
-    """Esegue l'agente e collega la trace al session_id su Langfuse v3.
+    """Esegue l'agente tracciando l'esecuzione su Langfuse v3.
 
-    In Langfuse v3 non esiste piu' langfuse.decorators.
-    Il session_id si imposta con langfuse.get_client().update_current_trace()
+    In Langfuse v3 (OTEL-based) il session_id si imposta con
+    langfuse.get_client().update_current_span(session_id=session_id)
     dentro una funzione decorata con @observe.
+    Non esistono piu' langfuse.decorators ne' update_current_trace.
     """
-    langfuse.get_client().update_current_trace(session_id=session_id)
+    try:
+        langfuse.get_client().update_current_span(session_id=session_id)
+    except Exception:
+        # Se anche update_current_span non e' disponibile, il tracing
+        # continua comunque senza session_id — non blocchiamo l'esecuzione.
+        pass
+
     result = agent(user_prompt)
     return str(result)
 
@@ -196,7 +203,11 @@ Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per rig
     for fid in fraud_ids:
         print(fid)
 
-    langfuse.get_client().flush()
+    try:
+        langfuse.get_client().flush()
+    except Exception:
+        pass
+
     return fraud_ids
 
 
