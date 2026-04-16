@@ -4,7 +4,7 @@ import pandas as pd
 import json
 from config import (
     TRANSACTIONS_FILE, LOCATIONS_FILE, MAILS_FILE,
-    SMS_FILE, USERS_FILE, AUDIO_DIR,
+    SMS_FILE, USERS_FILE, AUDIO_DIR, EXTRA_LOCATIONS_FILE,
 )
 
 
@@ -16,8 +16,10 @@ def load_transactions() -> pd.DataFrame:
     return df
 
 
-def load_json(path: str) -> list | dict:
-    """Carica un file JSON generico."""
+def load_json(path: str):
+    """Carica un file JSON generico se esiste, altrimenti restituisce None."""
+    if not os.path.exists(path):
+        return None
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -58,18 +60,43 @@ def list_audio_files() -> list[dict]:
     return files
 
 
+def _merge_locations() -> list:
+    """Unisce le location da LOCATIONS_FILE e EXTRA_LOCATIONS_FILE.
+
+    - Se uno dei due manca, usa solo l'altro.
+    - Se entrambi esistono, concatena le liste.
+    """
+    locations_main = load_json(LOCATIONS_FILE) or []
+    locations_extra = load_json(EXTRA_LOCATIONS_FILE) or []
+
+    result = []
+    for block in (locations_main, locations_extra):
+        if isinstance(block, list):
+            result.extend(block)
+        elif block:
+            result.append(block)
+    print(f"[loader] Location records totali: {len(result)}")
+    return result
+
+
 def load_all() -> dict:
-    """Carica tutti i dataset e li restituisce come dizionario."""
+    """Carica tutti i dataset e li restituisce come dizionario.
+
+    Questa versione gestisce anche dataset piu' grandi:
+    - transactions-5-5.csv
+    - locations-2-2.json + locations-2.json (merge)
+    - mails-3-3.json, sms-4-4.json, users-6-6.json
+    - tutti i file audio presenti in AUDIO_DIR
+    """
     transactions = load_transactions()
-    locations    = load_json(LOCATIONS_FILE)
-    mails        = load_json(MAILS_FILE)
-    sms          = load_json(SMS_FILE)
-    users        = load_json(USERS_FILE)
+    locations    = _merge_locations()
+    mails        = load_json(MAILS_FILE) or []
+    sms          = load_json(SMS_FILE) or []
+    users        = load_json(USERS_FILE) or []
     audio_files  = list_audio_files()
 
     print(f"[loader] Transazioni caricate: {len(transactions)}")
     print(f"[loader] Utenti: {len(users) if isinstance(users, list) else 'dict'}")
-    print(f"[loader] Location records: {len(locations) if isinstance(locations, list) else 'dict'}")
     print(f"[loader] File audio: {len(audio_files)}")
 
     return {
