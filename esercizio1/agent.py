@@ -89,13 +89,12 @@ Formato output finale (SOLO questo, nient'altro):
 def run_agent_with_trace(agent: Agent, user_prompt: str, session_id: str) -> str:
     """Esegue l'agente dentro un'observation Langfuse v4 con session_id.
 
-    API corretta per langfuse v4 (verificata con dir() sul client installato):
-    - start_as_current_observation()  -> context manager che crea la trace root
-    - update_current_span(session_id=session_id) -> associa il session_id alla trace
-    Non esistono: start_as_current_span, propagate_attributes, lf.trace()
+    API corretta per langfuse 4.3.1 (verificata con dir() sul client):
+    - start_as_current_observation(name=...) senza 'type'
+    - update_current_span(session_id=...) per associare il session_id
     """
     lf = langfuse_get_client()
-    with lf.start_as_current_observation(name="fraud-detection-esercizio1", type="SPAN"):
+    with lf.start_as_current_observation(name="fraud-detection-esercizio1"):
         lf.update_current_span(session_id=session_id)
         result = agent(user_prompt)
         output_str = str(result)
