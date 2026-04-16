@@ -66,7 +66,7 @@ def build_model() -> OpenAIModel:
         model_id=MODEL_ID,
         params={
             "temperature": 0.1,
-            "max_tokens": 4096,
+            "max_tokens": 8192,
         },
     )
 
