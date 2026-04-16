@@ -5,12 +5,12 @@ import ulid
 import pandas as pd
 from strands import Agent
 from strands.models.openai import OpenAIModel
-from langfuse import get_client
+from langfuse import get_client, observe
 
 from config import (
     OPENROUTER_API_KEY, OPENROUTER_BASE_URL, MODEL_ID,
     LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST,
-    OUTPUT_FILE
+    OUTPUT_FILE,
 )
 from data_loader import load_all
 from tools import (
@@ -28,10 +28,23 @@ os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
 # ---------------------------------------------------------------------------
-# Langfuse v4 (SDK v3 OTEL-based): get_client() legge le env var automaticamente:
-#   LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST
-# Non usare Langfuse() direttamente — in v4 il singleton è get_client().
+# Langfuse: usiamo il pattern del tutorial ufficiale "Resource Management".
+# - SDK Python con decorator @observe(as_type="generation")
+# - client singleton via get_client()
+# - update_current_trace(session_id=...) per associare il session id
+# - update_current_generation(..., usage_details={...}) per i token
+# NOTA: le credenziali nel .env della challenge usano nomi custom
+#       (langfuse_publicKey, langfuse_privateKey, langfuse_host).
+#       Qui le ributtiamo anche nelle variabili attese da Langfuse
+#       (LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY, LANGFUSE_HOST).
 # ---------------------------------------------------------------------------
+if LANGFUSE_PUBLIC_KEY:
+    os.environ.setdefault("LANGFUSE_PUBLIC_KEY", LANGFUSE_PUBLIC_KEY)
+if LANGFUSE_SECRET_KEY:
+    os.environ.setdefault("LANGFUSE_SECRET_KEY", LANGFUSE_SECRET_KEY)
+if LANGFUSE_HOST:
+    os.environ.setdefault("LANGFUSE_HOST", LANGFUSE_HOST)
+
 langfuse = get_client()
 
 
@@ -51,7 +64,7 @@ def build_model() -> OpenAIModel:
         params={
             "temperature": 0.1,
             "max_tokens": 4096,
-        }
+        },
     )
 
 
@@ -88,6 +101,53 @@ Formato output finale (SOLO questo, nient'altro):
 """
 
 
+@observe(as_type="generation")
+def run_agent_with_trace(session_id: str, model_id: str, agent: Agent, user_prompt: str) -> str:
+    """Esegue l'agente con tracing Langfuse.
+
+    Pattern preso dal tutorial ufficiale della challenge (sessionid.txt):
+    - @observe(as_type="generation") crea una generation Langfuse per ogni chiamata
+    - langfuse.update_current_trace(session_id=...) associa il session id alla trace
+    - langfuse.update_current_generation(..., usage_details={...}) invia i token
+    """
+    # Associa il session_id alla trace corrente
+    langfuse.update_current_trace(session_id=session_id)
+
+    # Registra input e modello
+    langfuse.update_current_generation(
+        model=model_id,
+        input=[{"role": "user", "content": user_prompt[:1000]}],
+    )
+
+    # Esegui Strands agent
+    result = agent(user_prompt)
+    output_str = str(result)
+
+    # Estrai usage dall'ultima invocazione dell'agente
+    invocation = getattr(getattr(result, "metrics", None), "latest_agent_invocation", None)
+    usage = {}
+    if invocation is not None and hasattr(invocation, "usage"):
+        usage = invocation.usage
+    elif hasattr(result, "metrics") and hasattr(result.metrics, "accumulated_usage"):
+        usage = result.metrics.accumulated_usage
+
+    # Aggiorna la generation con output e token
+    langfuse.update_current_generation(
+        model=model_id,
+        output=output_str[:1000],
+        usage_details={
+            "input": usage.get("inputTokens", 0),
+            "output": usage.get("outputTokens", 0),
+            "total": usage.get("totalTokens", 0),
+        },
+    )
+
+    return output_str
+
+
+# ---------------------------------------------------------------------------
+# Funzione principale
+# ---------------------------------------------------------------------------
 def run_fraud_detection():
     print("[agent] Caricamento dataset...")
     data = load_all()
@@ -153,50 +213,21 @@ Anteprima Locations:
 Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
 """
 
-    raw_output = ""
+    # Esegui l'agente con tracing Langfuse
+    raw_output = run_agent_with_trace(session_id, MODEL_ID, agent, user_prompt)
 
-    # ---------------------------------------------------------------------------
-    # Langfuse v4 tracing — pattern ufficiale SDK v3 OTEL:
-    #   with langfuse.start_as_current_span(name=..., session_id=...) as span:
-    #       span.update_trace(session_id=...)  # associa session_id alla trace
-    #       ... esegui l'agente ...
-    #   langfuse.flush()  # invia tutto prima di uscire
-    # ---------------------------------------------------------------------------
-    with langfuse.start_as_current_span(
-        name="fraud-detection",
-        session_id=session_id,
-    ) as span:
-        span.update_trace(session_id=session_id)
-
-        result = agent(user_prompt)
-        raw_output = str(result)
-
-        # Estrai token usage
-        invocation = getattr(getattr(result, "metrics", None), "latest_agent_invocation", None)
-        usage = {}
-        if invocation and hasattr(invocation, "usage"):
-            usage = invocation.usage
-        elif hasattr(result, "metrics") and hasattr(result.metrics, "accumulated_usage"):
-            usage = result.metrics.accumulated_usage
-
-        # Aggiorna lo span con i dettagli dell'invocazione
-        span.update_current_span(
-            input=user_prompt[:500],
-            output=raw_output[:500],
-            usage={
-                "input": usage.get("inputTokens", 0),
-                "output": usage.get("outputTokens", 0),
-                "total": usage.get("totalTokens", 0),
-            }
-        )
-
-    # Garantisce che tutte le trace siano inviate a Langfuse
-    langfuse.flush()
+    # Assicura che tutte le trace siano spedite a Langfuse
+    try:
+        langfuse.flush()
+    except Exception:
+        # Non bloccare la gara in caso di problemi di rete con Langfuse
+        pass
 
     # Estrai UUID validi dall'output del modello
     uuids = re.findall(
-        r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',
-        raw_output, re.IGNORECASE
+        r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+        raw_output,
+        re.IGNORECASE,
     )
 
     # Filtra solo ID che esistono nel dataset reale
