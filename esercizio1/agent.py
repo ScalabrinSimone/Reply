@@ -22,7 +22,7 @@ from tools import (
 )
 
 # ---------------------------------------------------------------------------
-# Langfuse v3 (OTEL-based): le env var devono essere settate PRIMA che
+# Langfuse v4 (OTEL-based): le env var devono essere settate PRIMA che
 # get_client() inizializzi il singleton al primo utilizzo.
 # ---------------------------------------------------------------------------
 os.environ["LANGFUSE_PUBLIC_KEY"] = LANGFUSE_PUBLIC_KEY or ""
@@ -87,20 +87,18 @@ Formato output finale (SOLO questo, nient'altro):
 
 
 def run_agent_with_trace(agent: Agent, user_prompt: str, session_id: str) -> str:
-    """Esegue l'agente dentro uno span Langfuse v3 con session_id.
+    """Esegue l'agente dentro un'observation Langfuse v4 con session_id.
 
-    In Langfuse v3 (OTEL-based):
-    - il client si ottiene con langfuse.get_client() (singleton)
-    - start_as_current_span e' un metodo del CLIENT, non del modulo
-    - propagate_attributes e' anch'esso un metodo del CLIENT
-    Ref: https://langfuse.com/docs/sdk/python/sdk-v3
+    API corretta per langfuse v4 (verificata con dir() sul client installato):
+    - start_as_current_observation()  -> context manager che crea la trace root
+    - update_current_span(session_id=session_id) -> associa il session_id alla trace
+    Non esistono: start_as_current_span, propagate_attributes, lf.trace()
     """
     lf = langfuse_get_client()
-    with lf.start_as_current_span(name="fraud-detection-esercizio1") as span:
-        lf.propagate_attributes(session_id=session_id)
+    with lf.start_as_current_observation(name="fraud-detection-esercizio1", type="SPAN"):
+        lf.update_current_span(session_id=session_id)
         result = agent(user_prompt)
         output_str = str(result)
-        span.set_attribute("output.length", len(output_str))
     return output_str
 
 
