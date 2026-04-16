@@ -35,7 +35,7 @@ os.environ["OPENAI_API_KEY"] = OPENROUTER_API_KEY or ""
 os.environ["OPENAI_BASE_URL"] = OPENROUTER_BASE_URL or ""
 
 # ---------------------------------------------------------------------------
-# Client Langfuse esplicito (per update_current_trace, update_current_generation e flush)
+# Client Langfuse esplicito (solo per flush finale)
 # ---------------------------------------------------------------------------
 langfuse_client = Langfuse(
     public_key=LANGFUSE_PUBLIC_KEY or "",
@@ -94,39 +94,10 @@ Formato output finale (SOLO questo, nient'altro):
 """
 
 
-# ---------------------------------------------------------------------------
-# Wrapper tracciato da Langfuse con session_id e token usage
-# ---------------------------------------------------------------------------
-@observe(as_type="generation")
-def _run_agent(agent: Agent, user_prompt: str, session_id: str) -> str:
-    """Esegue l'agente e traccia token usage + session_id su Langfuse."""
-    langfuse_client.update_current_trace(session_id=session_id)
-    langfuse_client.update_current_generation(
-        model=MODEL_ID,
-        input=[{"role": "user", "content": user_prompt}],
-    )
-
+def _run_agent_inner(agent: Agent, user_prompt: str) -> str:
+    """Esegue l'agente Strands e restituisce la risposta come stringa."""
     result = agent(user_prompt)
-    response = str(result)
-
-    # Estrai token usage dell'ultima invocazione
-    try:
-        invocation = result.metrics.latest_agent_invocation
-        usage = invocation.usage if invocation else result.metrics.accumulated_usage
-    except Exception:
-        usage = {}
-
-    langfuse_client.update_current_generation(
-        model=MODEL_ID,
-        output=response,
-        usage_details={
-            "input": usage.get("inputTokens", 0),
-            "output": usage.get("outputTokens", 0),
-            "total": usage.get("totalTokens", 0),
-        },
-    )
-
-    return response
+    return str(result)
 
 
 # ---------------------------------------------------------------------------
@@ -149,7 +120,7 @@ def run_fraud_detection():
     mails_preview = json.dumps(data["mails"])[:2000]
     loc_preview = json.dumps(data["locations"])[:1000]
 
-    # Genera session ID univoco per questa esecuzione
+    # Genera session ID univoco per questa esecuzione (formato TEAM_NAME-ULID)
     session_id = generate_session_id()
     print(f"[agent] Session ID: {session_id}")
     print(f"[agent] Avvio analisi su {len(transactions)} transazioni...")
@@ -200,7 +171,12 @@ Anteprima Locations:
 Rispondi SOLO con la lista degli UUID delle transazioni fraudolente, uno per riga.
 """
 
-    raw_output = _run_agent(agent, user_prompt, session_id)
+    # @observe con session_id: modo corretto in Langfuse v3 per raggruppare le trace
+    @observe(name="fraud-detection-esercizio1", session_id=session_id)
+    def traced_run():
+        return _run_agent_inner(agent, user_prompt)
+
+    raw_output = traced_run()
 
     # Estrai UUID validi dall'output del modello
     uuids = re.findall(
